@@ -101,7 +101,7 @@ export function AppLineChart({
     return { r: gs.markerSize };
   };
 
-  const getStrokeWidth = (line: ChartLine): number => {
+  const getStrokeWidth = (): number => {
     if (plotType === 'scatter') return 0;
     return gs.lineWidth;
   };
@@ -185,7 +185,7 @@ export function AppLineChart({
                 stroke={line.color}
                 name={line.name}
                 dot={showDots(line)}
-                strokeWidth={getStrokeWidth(line)}
+                strokeWidth={getStrokeWidth()}
                 legendType={plotType === 'scatter' ? 'circle' : undefined}
                 strokeDasharray={
                   line.type === 'dashed' ? '6 3' : line.type === 'dotted' ? '2 3' : undefined
