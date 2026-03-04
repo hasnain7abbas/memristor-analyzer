@@ -78,7 +78,9 @@ export const useAppStore = create<AppState>((set) => ({
   setExtractedParams: (params) => set({ extractedParams: params }),
 
   annConfig: {
+    modelType: 'mlp_1h',
     hiddenSize: 128,
+    hiddenSize2: 64,
     epochs: 50,
     learningRate: 0.03,
     batchSize: 32,
@@ -101,13 +103,18 @@ export const useAppStore = create<AppState>((set) => ({
     fontFamily: 'Times New Roman',
     axisFontSize: 12,
     titleFontSize: 14,
+    tickFontSize: 11,
     lineWidth: 2,
     markerSize: 4,
     backgroundColor: '#ffffff',
     axisColor: '#000000',
+    gridColor: '#cccccc',
     showGrid: true,
     gridOpacity: 0.3,
     showLegend: true,
+    showBorder: true,
+    borderColor: '#000000',
+    borderWidth: 1,
   },
   setGraphStyle: (style) =>
     set((s) => ({ graphStyle: { ...s.graphStyle, ...style } })),

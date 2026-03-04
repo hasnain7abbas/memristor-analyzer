@@ -1,12 +1,12 @@
 import { useAppStore } from '../stores/useAppStore';
 
 const PRESETS = [
-  { name: 'Frontiers/Elsevier (single col)', width: 600, height: 450, fontFamily: 'Times New Roman', axisFontSize: 12, titleFontSize: 14, dpi: 300 },
-  { name: 'Frontiers/Elsevier (double col)', width: 1200, height: 450, fontFamily: 'Times New Roman', axisFontSize: 14, titleFontSize: 16, dpi: 300 },
-  { name: 'Nature/Science', width: 600, height: 500, fontFamily: 'Helvetica', axisFontSize: 11, titleFontSize: 13, dpi: 600 },
-  { name: 'ACS Journals', width: 600, height: 450, fontFamily: 'Arial', axisFontSize: 12, titleFontSize: 14, dpi: 300 },
-  { name: 'IEEE', width: 600, height: 450, fontFamily: 'Times New Roman', axisFontSize: 12, titleFontSize: 14, dpi: 300 },
-  { name: 'Presentation 16:9', width: 960, height: 540, fontFamily: 'Arial', axisFontSize: 16, titleFontSize: 20, dpi: 150 },
+  { name: 'Frontiers/Elsevier (single col)', width: 600, height: 450, fontFamily: 'Times New Roman', axisFontSize: 12, titleFontSize: 14, tickFontSize: 11, dpi: 300 },
+  { name: 'Frontiers/Elsevier (double col)', width: 1200, height: 450, fontFamily: 'Times New Roman', axisFontSize: 14, titleFontSize: 16, tickFontSize: 12, dpi: 300 },
+  { name: 'Nature/Science', width: 600, height: 500, fontFamily: 'Helvetica', axisFontSize: 11, titleFontSize: 13, tickFontSize: 10, dpi: 600 },
+  { name: 'ACS Journals', width: 600, height: 450, fontFamily: 'Arial', axisFontSize: 12, titleFontSize: 14, tickFontSize: 11, dpi: 300 },
+  { name: 'IEEE', width: 600, height: 450, fontFamily: 'Times New Roman', axisFontSize: 12, titleFontSize: 14, tickFontSize: 11, dpi: 300 },
+  { name: 'Presentation 16:9', width: 960, height: 540, fontFamily: 'Arial', axisFontSize: 16, titleFontSize: 20, tickFontSize: 14, dpi: 150 },
 ];
 
 export function ExportPage() {
@@ -19,6 +19,7 @@ export function ExportPage() {
       fontFamily: preset.fontFamily,
       axisFontSize: preset.axisFontSize,
       titleFontSize: preset.titleFontSize,
+      tickFontSize: preset.tickFontSize,
       dpi: preset.dpi,
     });
   };
@@ -98,13 +99,24 @@ export function ExportPage() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-text-muted mb-1">Axis Font Size</label>
+            <label className="block text-xs text-text-muted mb-1">Axis Label Font Size</label>
             <input
               type="number"
               min={8}
               max={24}
               value={graphStyle.axisFontSize}
               onChange={(e) => setGraphStyle({ axisFontSize: parseInt(e.target.value) || 12 })}
+              className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted mb-1">Tick Font Size</label>
+            <input
+              type="number"
+              min={6}
+              max={20}
+              value={graphStyle.tickFontSize}
+              onChange={(e) => setGraphStyle({ tickFontSize: parseInt(e.target.value) || 11 })}
               className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
             />
           </div>
@@ -160,6 +172,35 @@ export function ExportPage() {
               className="w-full h-[38px] bg-surface-alt border border-border rounded-lg cursor-pointer"
             />
           </div>
+          <div>
+            <label className="block text-xs text-text-muted mb-1">Grid Color</label>
+            <input
+              type="color"
+              value={graphStyle.gridColor}
+              onChange={(e) => setGraphStyle({ gridColor: e.target.value })}
+              className="w-full h-[38px] bg-surface-alt border border-border rounded-lg cursor-pointer"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted mb-1">Border Color</label>
+            <input
+              type="color"
+              value={graphStyle.borderColor}
+              onChange={(e) => setGraphStyle({ borderColor: e.target.value })}
+              className="w-full h-[38px] bg-surface-alt border border-border rounded-lg cursor-pointer"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted mb-1">Border Width</label>
+            <input
+              type="number"
+              min={0}
+              max={5}
+              value={graphStyle.borderWidth}
+              onChange={(e) => setGraphStyle({ borderWidth: parseInt(e.target.value) || 1 })}
+              className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
+            />
+          </div>
           <div className="flex items-center gap-2 pt-5">
             <input
               type="checkbox"
@@ -180,6 +221,33 @@ export function ExportPage() {
             />
             <label htmlFor="legend-check" className="text-sm text-text-muted">Show Legend</label>
           </div>
+          <div className="flex items-center gap-2 pt-5">
+            <input
+              type="checkbox"
+              checked={graphStyle.showBorder}
+              onChange={(e) => setGraphStyle({ showBorder: e.target.checked })}
+              className="w-4 h-4 accent-accent"
+              id="border-check"
+            />
+            <label htmlFor="border-check" className="text-sm text-text-muted">Show Border</label>
+          </div>
+        </div>
+      </div>
+
+      {/* Grid opacity slider */}
+      <div className="bg-surface rounded-xl border border-border p-4 space-y-3">
+        <h3 className="text-sm font-medium text-text">Grid Opacity</h3>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={graphStyle.gridOpacity}
+            onChange={(e) => setGraphStyle({ gridOpacity: parseFloat(e.target.value) })}
+            className="flex-1 accent-accent"
+          />
+          <span className="text-sm text-text-muted font-mono w-10">{graphStyle.gridOpacity.toFixed(2)}</span>
         </div>
       </div>
 

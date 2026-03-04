@@ -20,8 +20,12 @@ pub struct ScriptParams {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScriptANNConfig {
+    #[serde(rename = "modelType", default = "default_model_type")]
+    pub model_type: String,
     #[serde(rename = "hiddenSize")]
     pub hidden_size: usize,
+    #[serde(rename = "hiddenSize2", default = "default_hidden_size_2")]
+    pub hidden_size_2: usize,
     pub epochs: usize,
     #[serde(rename = "learningRate")]
     pub learning_rate: f64,
@@ -29,17 +33,95 @@ pub struct ScriptANNConfig {
     pub batch_size: usize,
 }
 
+fn default_model_type() -> String {
+    "mlp_1h".to_string()
+}
+
+fn default_hidden_size_2() -> usize {
+    64
+}
+
 #[tauri::command]
 pub fn generate_python_script(
     params: ScriptParams,
     config: ScriptANNConfig,
 ) -> Result<String, String> {
+    // Build model class string based on model type
+    let (model_class, arch_str) = match config.model_type.as_str() {
+        "perceptron" => (
+            format!(
+                r#"class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(784, 10)
+        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
+        nn.init.zeros_(self.fc1.bias)
+
+    def forward(self, x):
+        x = x.view(-1, 784)
+        x = self.fc1(x)
+        return x"#
+            ),
+            "784 → 10".to_string(),
+        ),
+        "mlp_2h" => (
+            format!(
+                r#"class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(784, HIDDEN_SIZE)
+        self.fc2 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE_2)
+        self.fc3 = nn.Linear(HIDDEN_SIZE_2, 10)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in [self.fc1, self.fc2, self.fc3]:
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = x.view(-1, 784)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x"#
+            ),
+            format!("784 → {{HIDDEN_SIZE}} → {{HIDDEN_SIZE_2}} → 10"),
+        ),
+        _ => (
+            // mlp_1h
+            format!(
+                r#"class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(784, HIDDEN_SIZE)
+        self.fc2 = nn.Linear(HIDDEN_SIZE, 10)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.fc2.weight, nonlinearity='relu')
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x):
+        x = x.view(-1, 784)
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x"#
+            ),
+            format!("784 → {{HIDDEN_SIZE}} → 10"),
+        ),
+    };
+
     let script = format!(
         r#"#!/usr/bin/env python3
 """
 Memristor Neural Analyzer — MNIST ANN Simulation Script
 Generated with device parameters from experimental data.
 This script trains on the REAL MNIST dataset (60,000 images).
+Uses copy-and-degrade approach: only ideal network is trained,
+memristor accuracy is evaluated by copying and degrading weights each epoch.
 
 Requirements: pip install torch torchvision matplotlib numpy
 """
@@ -52,6 +134,7 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
 import csv
+import copy
 import os
 
 # ============================================================
@@ -70,6 +153,8 @@ NUM_LEVELS = max(NUM_LEVELS_P, NUM_LEVELS_D)
 # Training Configuration
 # ============================================================
 HIDDEN_SIZE = {hidden_size}
+HIDDEN_SIZE_2 = {hidden_size_2}
+MODEL_TYPE = '{model_type}'
 EPOCHS = {epochs}
 LEARNING_RATE = 0.01
 BATCH_SIZE = {batch_size}
@@ -78,28 +163,36 @@ MOMENTUM = 0.9
 # ============================================================
 # Model Definition
 # ============================================================
-class MLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(784, HIDDEN_SIZE)
-        self.fc2 = nn.Linear(HIDDEN_SIZE, 10)
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.fc2.weight, nonlinearity='relu')
-        nn.init.zeros_(self.fc1.bias)
-        nn.init.zeros_(self.fc2.bias)
-
-    def forward(self, x):
-        x = x.view(-1, 784)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+{model_class}
 
 # ============================================================
-# Memristor Non-Ideality Functions
+# Memristor Non-Ideality Functions (Copy-and-Degrade)
 # ============================================================
+def apply_nonlinear_weight_remap(model):
+    """Apply non-linear weight remapping to simulate memristor storage distortion."""
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.dim() < 2:
+                continue
+            w = param.data
+            w_min, w_max = w.min(), w.max()
+            if w_max - w_min < 1e-10:
+                continue
+
+            w_norm = ((w - w_min) / (w_max - w_min)).clamp(0.0, 1.0)
+
+            # Use alpha_p for upper half, alpha_d for lower half
+            alpha_map = torch.where(w_norm >= 0.5,
+                torch.tensor(ALPHA_P, device=w.device),
+                torch.tensor(ALPHA_D, device=w.device))
+
+            # Non-linear remapping: (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha))
+            near_linear = alpha_map.abs() < 0.01
+            remapped = torch.where(near_linear, w_norm,
+                (1.0 - torch.exp(-alpha_map * w_norm)) / (1.0 - torch.exp(-alpha_map)))
+
+            param.data = remapped * (w_max - w_min) + w_min
+
 def quantize_and_add_noise(model):
     """Quantize weights to N levels and add Gaussian write noise."""
     with torch.no_grad():
@@ -111,44 +204,11 @@ def quantize_and_add_noise(model):
             if w_max - w_min < 1e-10:
                 continue
 
-            # Normalize to [0, 1]
             w_norm = (w - w_min) / (w_max - w_min)
-            # Quantize
             w_norm = torch.round(w_norm * (NUM_LEVELS - 1)) / (NUM_LEVELS - 1)
-            # Add noise
             noise = torch.randn_like(w_norm) * WRITE_NOISE / np.sqrt(NUM_LEVELS)
-            w_norm = w_norm + noise
-            # Clamp
-            w_norm = torch.clamp(w_norm, 0.0, 1.0)
-            # Denormalize
+            w_norm = torch.clamp(w_norm + noise, 0.0, 1.0)
             param.data = w_norm * (w_max - w_min) + w_min
-
-def apply_nonlinear_gradient_scaling(model):
-    """Scale gradients based on memristor non-linearity."""
-    with torch.no_grad():
-        for param in model.parameters():
-            if param.grad is None or param.dim() < 2:
-                continue
-            w = param.data
-            g = param.grad.data
-            w_min, w_max = w.min(), w.max()
-            if w_max - w_min < 1e-10:
-                continue
-
-            w_norm = ((w - w_min) / (w_max - w_min)).clamp(0.001, 0.999)
-
-            # Potentiation direction (positive gradient)
-            pot_mask = g > 0
-            pot_scale = ((1.0 - w_norm) ** (ALPHA_P - 1.0)).clamp(0.05, 10.0)
-
-            # Depression direction (negative gradient)
-            dep_mask = g < 0
-            dep_scale = (w_norm ** (ALPHA_D - 1.0)).clamp(0.05, 10.0)
-
-            scaled = g.clone()
-            scaled[pot_mask] *= pot_scale[pot_mask]
-            scaled[dep_mask] *= dep_scale[dep_mask]
-            param.grad.data = scaled
 
 # ============================================================
 # Data Loading
@@ -166,28 +226,24 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=1000)
 
 # ============================================================
-# Training
+# Training (Copy-and-Degrade approach)
 # ============================================================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {{device}}")
 
-# Create two models with identical initial weights
+# Only the ideal model is trained
 ideal_model = MLP().to(device)
-mem_model = MLP().to(device)
-mem_model.load_state_dict(ideal_model.state_dict())
-
 ideal_optimizer = optim.SGD(ideal_model.parameters(), lr=LEARNING_RATE, momentum=MOMENTUM)
-mem_optimizer = optim.SGD(mem_model.parameters(), lr=LEARNING_RATE, momentum=MOMENTUM)
 criterion = nn.CrossEntropyLoss()
 
 results = []
-print(f"\nTraining for {{EPOCHS}} epochs...")
-print(f"Architecture: 784 → {{HIDDEN_SIZE}} → 10")
+print(f"\nTraining for {{EPOCHS}} epochs (copy-and-degrade approach)...")
+print(f"Architecture: {arch_str}")
 print(f"Device params: αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}}")
 print("-" * 70)
 
 for epoch in range(1, EPOCHS + 1):
-    # Train ideal model
+    # Train ideal model only
     ideal_model.train()
     for data, target in train_loader:
         data, target = data.to(device), target.to(device)
@@ -197,20 +253,12 @@ for epoch in range(1, EPOCHS + 1):
         loss.backward()
         ideal_optimizer.step()
 
-    # Train memristor model
-    mem_model.train()
-    for data, target in train_loader:
-        data, target = data.to(device), target.to(device)
-        mem_optimizer.zero_grad()
-        output = mem_model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        apply_nonlinear_gradient_scaling(mem_model)
-        mem_optimizer.step()
-
+    # Copy-and-degrade: clone ideal weights, then apply memristor non-idealities
+    mem_model = copy.deepcopy(ideal_model)
+    apply_nonlinear_weight_remap(mem_model)
     quantize_and_add_noise(mem_model)
 
-    # Evaluate
+    # Evaluate both
     ideal_model.eval()
     mem_model.eval()
 
@@ -273,7 +321,7 @@ ax.plot(epochs_list, [r['ideal_acc'] for r in results], 'b-o', markersize=3, lab
 ax.plot(epochs_list, [r['mem_acc'] for r in results], 'r-s', markersize=3, label='Memristor', linewidth=2)
 ax.set_xlabel('Epoch')
 ax.set_ylabel('Test Accuracy (%)')
-ax.set_title(f'MNIST Classification: Ideal vs Memristor\n'
+ax.set_title(f'MNIST Classification: Ideal vs Memristor (Copy-and-Degrade)\n'
              f'(αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}})')
 ax.legend()
 ax.grid(True, alpha=0.3)
@@ -293,8 +341,12 @@ plt.show()
         num_levels_p = params.num_levels_p,
         num_levels_d = params.num_levels_d,
         hidden_size = config.hidden_size,
+        hidden_size_2 = config.hidden_size_2,
+        model_type = config.model_type,
         epochs = config.epochs,
         batch_size = config.batch_size,
+        model_class = model_class,
+        arch_str = arch_str,
     );
 
     Ok(script)

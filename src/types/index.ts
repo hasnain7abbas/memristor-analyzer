@@ -52,8 +52,12 @@ export interface ExtractedParams {
   deltaG: { G: number; dG: number }[];
 }
 
+export type ANNModelType = 'perceptron' | 'mlp_1h' | 'mlp_2h';
+
 export interface ANNConfig {
+  modelType: ANNModelType;
   hiddenSize: number;
+  hiddenSize2: number;
   epochs: number;
   learningRate: number;
   batchSize: number;
@@ -74,13 +78,27 @@ export interface GraphStyle {
   fontFamily: string;
   axisFontSize: number;
   titleFontSize: number;
+  tickFontSize: number;
   lineWidth: number;
   markerSize: number;
   backgroundColor: string;
   axisColor: string;
+  gridColor: string;
   showGrid: boolean;
   gridOpacity: number;
   showLegend: boolean;
+  showBorder: boolean;
+  borderColor: string;
+  borderWidth: number;
+}
+
+export type PlotType = 'line' | 'scatter' | 'line_scatter' | 'step';
+
+export interface ChartLocalSettings {
+  xLabel: string;
+  yLabel: string;
+  plotType: PlotType;
+  caption: string;
 }
 
 export type TabId = 'upload' | 'smoothing' | 'parameters' | 'ann' | 'export';
