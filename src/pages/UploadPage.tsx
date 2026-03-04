@@ -5,6 +5,7 @@ import {
 import { useAppStore } from '../stores/useAppStore';
 import { FileUploader } from '../components/FileUploader';
 import { DataTable } from '../components/DataTable';
+import { AppLineChart } from '../components/Chart';
 import type { Dataset, TestType, ColumnMapping } from '../types';
 
 const TEST_TYPES: TestType[] = [
@@ -171,6 +172,15 @@ function TestCard({ test }: { test: TestType }) {
     });
   };
 
+  // Build preview chart data from first numeric column
+  const previewChart = (() => {
+    if (!uploaded) return null;
+    const numCol = uploaded.dataset.columns.find((c) => c.values.length > 0);
+    if (!numCol || numCol.values.length < 2) return null;
+    const chartData = numCol.values.map((v, i) => ({ index: i + 1, [numCol.name]: v }));
+    return { data: chartData, dataKey: numCol.name };
+  })();
+
   return (
     <div
       className={`rounded-xl border transition-all ${
@@ -281,6 +291,19 @@ function TestCard({ test }: { test: TestType }) {
                 rows={uploaded.dataset.rows}
                 maxRows={5}
               />
+
+              {/* Data preview chart */}
+              {previewChart && (
+                <AppLineChart
+                  data={previewChart.data}
+                  lines={[{ dataKey: previewChart.dataKey, color: '#4f8ff7', name: previewChart.dataKey }]}
+                  xKey="index"
+                  xLabel="Index"
+                  yLabel={previewChart.dataKey}
+                  heightOverride={200}
+                  id={`preview-${test.id}`}
+                />
+              )}
             </div>
           )}
         </div>

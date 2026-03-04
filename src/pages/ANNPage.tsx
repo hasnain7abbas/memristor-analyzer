@@ -5,8 +5,15 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { useAppStore } from '../stores/useAppStore';
 import { AppLineChart } from '../components/Chart';
+import { ChartControls } from '../components/ChartControls';
 import { StatCard } from '../components/StatCard';
-import type { ANNEpochResult } from '../types';
+import type { ANNEpochResult, ANNModelType, ChartLocalSettings } from '../types';
+
+const MODEL_OPTIONS: { value: ANNModelType; label: string; desc: string }[] = [
+  { value: 'perceptron', label: 'Perceptron', desc: '784 → 10 (no hidden layer)' },
+  { value: 'mlp_1h', label: 'MLP (1 Hidden)', desc: '784 → H → 10' },
+  { value: 'mlp_2h', label: 'MLP (2 Hidden)', desc: '784 → H1 → H2 → 10' },
+];
 
 export function ANNPage() {
   const {
@@ -20,8 +27,10 @@ export function ANNPage() {
     setIsTraining,
   } = useAppStore();
   const [error, setError] = useState<string | null>(null);
+  const [accChart, setAccChart] = useState<ChartLocalSettings>({
+    xLabel: 'Epoch', yLabel: 'Accuracy (%)', plotType: 'line', caption: '',
+  });
 
-  // Listen for progress events
   useEffect(() => {
     const unlisten = listen<ANNEpochResult>('ann-progress', (event) => {
       addANNResult(event.payload);
@@ -96,6 +105,18 @@ export function ANNPage() {
     ? (annResults.length / annConfig.epochs) * 100
     : 0;
 
+  // Build dynamic architecture visualization
+  const archLayers: { size: number; color: string; bgClass: string; borderClass: string }[] = [
+    { size: 784, color: 'text-accent', bgClass: 'bg-accent/10', borderClass: 'border-accent/20' },
+  ];
+  if (annConfig.modelType !== 'perceptron') {
+    archLayers.push({ size: annConfig.hiddenSize, color: 'text-purple', bgClass: 'bg-purple/10', borderClass: 'border-purple/20' });
+  }
+  if (annConfig.modelType === 'mlp_2h') {
+    archLayers.push({ size: annConfig.hiddenSize2, color: 'text-cyan', bgClass: 'bg-cyan/10', borderClass: 'border-cyan/20' });
+  }
+  archLayers.push({ size: 10, color: 'text-green', bgClass: 'bg-green/10', borderClass: 'border-green/20' });
+
   return (
     <div className="space-y-6">
       <div>
@@ -112,16 +133,47 @@ export function ANNPage() {
           <div className="bg-surface rounded-xl border border-border p-4 space-y-3">
             <h3 className="text-sm font-medium text-text">Network Configuration</h3>
             <div>
-              <label className="block text-xs text-text-muted mb-1">Hidden Neurons</label>
-              <input
-                type="number"
-                min={16}
-                max={512}
-                value={annConfig.hiddenSize}
-                onChange={(e) => setANNConfig({ hiddenSize: parseInt(e.target.value) || 128 })}
-                className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
-              />
+              <label className="block text-xs text-text-muted mb-1">Model Type</label>
+              <select
+                value={annConfig.modelType}
+                onChange={(e) => setANNConfig({ modelType: e.target.value as ANNModelType })}
+                className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text"
+              >
+                {MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label} — {o.desc}</option>
+                ))}
+              </select>
             </div>
+            {annConfig.modelType !== 'perceptron' && (
+              <div>
+                <label className="block text-xs text-text-muted mb-1">
+                  Hidden Layer 1 Neurons
+                </label>
+                <input
+                  type="number"
+                  min={16}
+                  max={512}
+                  value={annConfig.hiddenSize}
+                  onChange={(e) => setANNConfig({ hiddenSize: parseInt(e.target.value) || 128 })}
+                  className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
+                />
+              </div>
+            )}
+            {annConfig.modelType === 'mlp_2h' && (
+              <div>
+                <label className="block text-xs text-text-muted mb-1">
+                  Hidden Layer 2 Neurons
+                </label>
+                <input
+                  type="number"
+                  min={16}
+                  max={512}
+                  value={annConfig.hiddenSize2}
+                  onChange={(e) => setANNConfig({ hiddenSize2: parseInt(e.target.value) || 64 })}
+                  className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text font-mono"
+                />
+              </div>
+            )}
             <div>
               <label className="block text-xs text-text-muted mb-1">Epochs</label>
               <input
@@ -172,21 +224,20 @@ export function ANNPage() {
             </div>
           )}
 
-          {/* Architecture */}
+          {/* Dynamic architecture */}
           <div className="bg-surface rounded-xl border border-border p-4">
             <h3 className="text-sm font-medium text-text mb-2">Architecture</h3>
-            <div className="flex items-center justify-center gap-2 py-3">
-              <div className="px-3 py-2 bg-accent/10 border border-accent/20 rounded-lg text-xs font-mono text-accent">
-                784
-              </div>
-              <span className="text-text-dim">→</span>
-              <div className="px-3 py-2 bg-purple/10 border border-purple/20 rounded-lg text-xs font-mono text-purple">
-                {annConfig.hiddenSize}
-              </div>
-              <span className="text-text-dim">→</span>
-              <div className="px-3 py-2 bg-green/10 border border-green/20 rounded-lg text-xs font-mono text-green">
-                10
-              </div>
+            <div className="flex items-center justify-center gap-2 py-3 flex-wrap">
+              {archLayers.map((layer, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <div className={`px-3 py-2 ${layer.bgClass} border ${layer.borderClass} rounded-lg text-xs font-mono ${layer.color}`}>
+                    {layer.size}
+                  </div>
+                  {i < archLayers.length - 1 && (
+                    <span className="text-text-dim">→</span>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
 
@@ -226,6 +277,7 @@ export function ANNPage() {
         <div className="space-y-4">
           {chartData.length > 0 ? (
             <>
+              <ChartControls settings={accChart} onChange={(s) => setAccChart((p) => ({ ...p, ...s }))} />
               <AppLineChart
                 data={chartData}
                 lines={[
@@ -233,10 +285,12 @@ export function ANNPage() {
                   { dataKey: 'memristor', color: '#f87171', name: 'Memristor' },
                 ]}
                 xKey="epoch"
-                xLabel="Epoch"
-                yLabel="Accuracy (%)"
+                xLabel={accChart.xLabel}
+                yLabel={accChart.yLabel}
                 title="Accuracy vs Epoch"
-                style={{ height: 400 }}
+                caption={accChart.caption}
+                plotType={accChart.plotType}
+                heightOverride={400}
                 id="ann-accuracy"
               />
 

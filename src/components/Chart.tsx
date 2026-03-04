@@ -1,10 +1,11 @@
 import { useRef, useCallback } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ScatterChart, Scatter,
+  ResponsiveContainer,
 } from 'recharts';
 import { Download } from 'lucide-react';
-import type { GraphStyle } from '../types';
+import { useAppStore } from '../stores/useAppStore';
+import type { PlotType } from '../types';
 
 interface ChartLine {
   dataKey: string;
@@ -21,14 +22,19 @@ interface LineChartProps {
   xLabel?: string;
   yLabel?: string;
   title?: string;
-  style?: Partial<GraphStyle>;
+  caption?: string;
+  plotType?: PlotType;
+  heightOverride?: number;
   id?: string;
 }
 
 export function AppLineChart({
-  data, lines, xKey, xLabel, yLabel, title, style, id,
+  data, lines, xKey, xLabel, yLabel, title, caption, plotType = 'line', heightOverride, id,
 }: LineChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
+  const gs = useAppStore((s) => s.graphStyle);
+
+  const chartHeight = heightOverride ?? gs.height;
 
   const handleExportSVG = useCallback(() => {
     if (!chartRef.current) return;
@@ -51,10 +57,9 @@ export function AppLineChart({
     if (!svg) return;
     const serializer = new XMLSerializer();
     const svgStr = serializer.serializeToString(svg);
-    const dpi = style?.dpi || 300;
-    const scale = dpi / 96;
-    const w = (style?.width || 600) * scale;
-    const h = (style?.height || 400) * scale;
+    const scale = gs.dpi / 96;
+    const w = gs.width * scale;
+    const h = chartHeight * scale;
 
     const canvas = document.createElement('canvas');
     canvas.width = w;
@@ -66,7 +71,7 @@ export function AppLineChart({
     const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     img.onload = () => {
-      ctx.fillStyle = style?.backgroundColor || '#ffffff';
+      ctx.fillStyle = gs.backgroundColor;
       ctx.fillRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
       canvas.toBlob((b) => {
@@ -81,13 +86,37 @@ export function AppLineChart({
       URL.revokeObjectURL(url);
     };
     img.src = url;
-  }, [id, style]);
+  }, [id, gs, chartHeight]);
+
+  const getLineType = (pt: PlotType): 'monotone' | 'stepAfter' => {
+    if (pt === 'step') return 'stepAfter';
+    return 'monotone';
+  };
+
+  const showDots = (line: ChartLine): boolean | object => {
+    if (plotType === 'scatter') return { r: gs.markerSize };
+    if (plotType === 'line_scatter') return { r: gs.markerSize };
+    if (line.dot === true) return { r: gs.markerSize };
+    if (line.dot === false) return false;
+    return { r: gs.markerSize };
+  };
+
+  const getStrokeWidth = (line: ChartLine): number => {
+    if (plotType === 'scatter') return 0;
+    return gs.lineWidth;
+  };
+
+  const borderStyle = gs.showBorder
+    ? `${gs.borderWidth}px solid ${gs.borderColor}`
+    : 'none';
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" style={{ fontFamily: gs.fontFamily }}>
       {title && (
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-text">{title}</h3>
+          <h3 style={{ fontSize: gs.titleFontSize, color: gs.axisColor, fontFamily: gs.fontFamily }} className="font-semibold">
+            {title}
+          </h3>
           <div className="flex gap-1">
             <button
               onClick={handleExportSVG}
@@ -106,39 +135,58 @@ export function AppLineChart({
           </div>
         </div>
       )}
-      <div ref={chartRef} className="bg-surface rounded-lg p-4 border border-border">
-        <ResponsiveContainer width="100%" height={style?.height || 350}>
+      <div
+        ref={chartRef}
+        style={{
+          backgroundColor: gs.backgroundColor,
+          border: borderStyle,
+          borderRadius: '8px',
+          padding: '16px',
+          fontFamily: gs.fontFamily,
+        }}
+      >
+        <ResponsiveContainer width="100%" height={chartHeight}>
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1c2840" opacity={0.5} />
+            {gs.showGrid && (
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke={gs.gridColor}
+                opacity={gs.gridOpacity}
+              />
+            )}
             <XAxis
               dataKey={xKey}
-              stroke="#4a5c7a"
-              tick={{ fill: '#8494b2', fontSize: 11 }}
-              label={xLabel ? { value: xLabel, fill: '#8494b2', dy: 15, fontSize: 12 } : undefined}
+              stroke={gs.axisColor}
+              tick={{ fill: gs.axisColor, fontSize: gs.tickFontSize, fontFamily: gs.fontFamily }}
+              label={xLabel ? { value: xLabel, fill: gs.axisColor, dy: 15, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
             />
             <YAxis
-              stroke="#4a5c7a"
-              tick={{ fill: '#8494b2', fontSize: 11 }}
-              label={yLabel ? { value: yLabel, fill: '#8494b2', angle: -90, dx: -20, fontSize: 12 } : undefined}
+              stroke={gs.axisColor}
+              tick={{ fill: gs.axisColor, fontSize: gs.tickFontSize, fontFamily: gs.fontFamily }}
+              label={yLabel ? { value: yLabel, fill: gs.axisColor, angle: -90, dx: -20, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: '#0d1219',
-                border: '1px solid #1c2840',
+                backgroundColor: gs.backgroundColor,
+                border: `1px solid ${gs.gridColor}`,
                 borderRadius: '8px',
-                fontSize: 12,
+                fontSize: gs.tickFontSize,
+                fontFamily: gs.fontFamily,
               }}
             />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
+            {gs.showLegend && (
+              <Legend wrapperStyle={{ fontSize: gs.axisFontSize, fontFamily: gs.fontFamily }} />
+            )}
             {lines.map((line) => (
               <Line
                 key={line.dataKey}
-                type="monotone"
+                type={getLineType(plotType)}
                 dataKey={line.dataKey}
                 stroke={line.color}
                 name={line.name}
-                dot={line.dot !== false ? { r: 2 } : false}
-                strokeWidth={2}
+                dot={showDots(line)}
+                strokeWidth={getStrokeWidth(line)}
+                legendType={plotType === 'scatter' ? 'circle' : undefined}
                 strokeDasharray={
                   line.type === 'dashed' ? '6 3' : line.type === 'dotted' ? '2 3' : undefined
                 }
@@ -147,59 +195,11 @@ export function AppLineChart({
           </LineChart>
         </ResponsiveContainer>
       </div>
-    </div>
-  );
-}
-
-interface ScatterChartProps {
-  data: { x: number; y: number }[];
-  xLabel?: string;
-  yLabel?: string;
-  title?: string;
-  color?: string;
-  id?: string;
-}
-
-export function AppScatterChart({
-  data, xLabel, yLabel, title, color = '#4f8ff7', id: _id,
-}: ScatterChartProps) {
-  const chartRef = useRef<HTMLDivElement>(null);
-
-  return (
-    <div className="space-y-2">
-      {title && <h3 className="text-sm font-semibold text-text">{title}</h3>}
-      <div ref={chartRef} className="bg-surface rounded-lg p-4 border border-border">
-        <ResponsiveContainer width="100%" height={300}>
-          <ScatterChart>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1c2840" opacity={0.5} />
-            <XAxis
-              dataKey="x"
-              type="number"
-              stroke="#4a5c7a"
-              tick={{ fill: '#8494b2', fontSize: 11 }}
-              label={xLabel ? { value: xLabel, fill: '#8494b2', dy: 15, fontSize: 12 } : undefined}
-              name={xLabel}
-            />
-            <YAxis
-              dataKey="y"
-              type="number"
-              stroke="#4a5c7a"
-              tick={{ fill: '#8494b2', fontSize: 11 }}
-              label={yLabel ? { value: yLabel, fill: '#8494b2', angle: -90, dx: -20, fontSize: 12 } : undefined}
-              name={yLabel}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: '#0d1219',
-                border: '1px solid #1c2840',
-                borderRadius: '8px',
-                fontSize: 12,
-              }}
-            />
-            <Scatter data={data} fill={color} r={3} />
-          </ScatterChart>
-        </ResponsiveContainer>
-      </div>
+      {caption && (
+        <p style={{ fontSize: gs.axisFontSize, color: gs.axisColor, fontFamily: gs.fontFamily }} className="text-center italic">
+          {caption}
+        </p>
+      )}
     </div>
   );
 }

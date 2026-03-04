@@ -3,7 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/useAppStore';
 import { FormulaCard } from '../components/FormulaCard';
 import { StatCard } from '../components/StatCard';
-import { AppLineChart, AppScatterChart } from '../components/Chart';
+import { AppLineChart } from '../components/Chart';
+import { ChartControls } from '../components/ChartControls';
+import type { ChartLocalSettings } from '../types';
 
 const FORMULAS = [
   {
@@ -61,6 +63,13 @@ export function ParametersPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [pdChart, setPdChart] = useState<ChartLocalSettings>({
+    xLabel: 'Pulse Number', yLabel: 'Conductance (µS)', plotType: 'line', caption: '',
+  });
+  const [dgChart, setDgChart] = useState<ChartLocalSettings>({
+    xLabel: 'G (µS)', yLabel: 'ΔG (µS)', plotType: 'scatter', caption: '',
+  });
+
   const pdTest = uploadedTests['pd_training'] || uploadedTests['ltp_ltd'];
 
   const handleExtract = async () => {
@@ -72,7 +81,6 @@ export function ParametersPage() {
       const ds = pdTest.dataset;
       const mapping = pdTest.columnMapping;
 
-      // Get conductance/current column
       const condColName = mapping['conductance_uS'] || ds.headers.find((h) => /conductance|cond|g_?us|^g$/i.test(h));
       const currentColName = mapping['current_uA'] || ds.headers.find((h) => /current|i_?ua/i.test(h));
       const colName = condColName || currentColName;
@@ -92,7 +100,6 @@ export function ParametersPage() {
         throw new Error('Need at least 4 data points');
       }
 
-      // Auto-detect P/D split
       const typeColName = mapping['type'] || ds.headers.find((h) => /type|phase/i.test(h));
       let pRaw: number[];
       let dRaw: number[];
@@ -102,13 +109,11 @@ export function ParametersPage() {
         pRaw = values.filter((_, i) => /^p|pot|ltp/i.test(typeVals[i]));
         dRaw = values.filter((_, i) => /^d|dep|ltd/i.test(typeVals[i]));
         if (pRaw.length === 0 || dRaw.length === 0) {
-          // Fallback to peak detection
           const peakIdx = values.indexOf(Math.max(...values));
           pRaw = values.slice(0, peakIdx + 1);
           dRaw = values.slice(peakIdx);
         }
       } else {
-        // Peak detection split
         const peakIdx = values.indexOf(Math.max(...values));
         if (peakIdx > values.length * 0.8 || peakIdx < values.length * 0.2) {
           const mid = Math.floor(values.length / 2);
@@ -120,7 +125,6 @@ export function ParametersPage() {
         }
       }
 
-      // Check for multi-cycle data
       const cycleColName = mapping['cycle'] || ds.headers.find((h) => /cycle/i.test(h));
       let multiCycleData: number[][] | null = null;
       if (cycleColName) {
@@ -187,8 +191,9 @@ export function ParametersPage() {
       ]
     : [];
 
+  // Reshape deltaG data from {x,y}[] to keyed records for AppLineChart
   const deltaGData = extractedParams
-    ? extractedParams.deltaG.map((d: { G: number; dG: number }) => ({ x: d.G, y: d.dG }))
+    ? extractedParams.deltaG.map((d: { G: number; dG: number }) => ({ G: d.G, dG: d.dG }))
     : [];
 
   return (
@@ -273,33 +278,44 @@ export function ParametersPage() {
           </div>
 
           {pdChartData.length > 0 && (
-            <AppLineChart
-              data={pdChartData}
-              lines={[
-                { dataKey: 'potRaw', color: '#8494b2', name: 'P Raw', dot: true, type: 'dotted' },
-                { dataKey: 'potSmoothed', color: '#34d399', name: 'P Smoothed' },
-                { dataKey: 'potFitted', color: '#34d399', name: 'P Fitted', type: 'dashed' },
-                { dataKey: 'depRaw', color: '#8494b2', name: 'D Raw', dot: true, type: 'dotted' },
-                { dataKey: 'depSmoothed', color: '#f87171', name: 'D Smoothed' },
-                { dataKey: 'depFitted', color: '#f87171', name: 'D Fitted', type: 'dashed' },
-              ]}
-              xKey="index"
-              xLabel="Pulse Number"
-              yLabel="Conductance (µS)"
-              title="Potentiation / Depression Curves"
-              id="pd-curves"
-            />
+            <>
+              <ChartControls settings={pdChart} onChange={(s) => setPdChart((p) => ({ ...p, ...s }))} />
+              <AppLineChart
+                data={pdChartData}
+                lines={[
+                  { dataKey: 'potRaw', color: '#8494b2', name: 'P Raw', dot: true, type: 'dotted' },
+                  { dataKey: 'potSmoothed', color: '#34d399', name: 'P Smoothed' },
+                  { dataKey: 'potFitted', color: '#34d399', name: 'P Fitted', type: 'dashed' },
+                  { dataKey: 'depRaw', color: '#8494b2', name: 'D Raw', dot: true, type: 'dotted' },
+                  { dataKey: 'depSmoothed', color: '#f87171', name: 'D Smoothed' },
+                  { dataKey: 'depFitted', color: '#f87171', name: 'D Fitted', type: 'dashed' },
+                ]}
+                xKey="index"
+                xLabel={pdChart.xLabel}
+                yLabel={pdChart.yLabel}
+                title="Potentiation / Depression Curves"
+                caption={pdChart.caption}
+                plotType={pdChart.plotType}
+                id="pd-curves"
+              />
+            </>
           )}
 
           {deltaGData.length > 0 && (
-            <AppScatterChart
-              data={deltaGData}
-              xLabel="G (µS)"
-              yLabel="ΔG (µS)"
-              title="ΔG vs G — Switching Statistics"
-              color="#a78bfa"
-              id="delta-g-scatter"
-            />
+            <>
+              <ChartControls settings={dgChart} onChange={(s) => setDgChart((p) => ({ ...p, ...s }))} />
+              <AppLineChart
+                data={deltaGData}
+                lines={[{ dataKey: 'dG', color: '#a78bfa', name: 'ΔG' }]}
+                xKey="G"
+                xLabel={dgChart.xLabel}
+                yLabel={dgChart.yLabel}
+                title="ΔG vs G — Switching Statistics"
+                caption={dgChart.caption}
+                plotType={dgChart.plotType}
+                id="delta-g-scatter"
+              />
+            </>
           )}
         </div>
       )}

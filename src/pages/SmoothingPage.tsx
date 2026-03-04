@@ -3,7 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/useAppStore';
 import { SmoothingControls } from '../components/SmoothingControls';
 import { AppLineChart } from '../components/Chart';
+import { ChartControls } from '../components/ChartControls';
 import { Info } from 'lucide-react';
+import type { ChartLocalSettings } from '../types';
 
 export function SmoothingPage() {
   const { uploadedTests, smoothingConfig, smoothedData, setSmoothedData } = useAppStore();
@@ -11,6 +13,13 @@ export function SmoothingPage() {
   const [selectedColumn, setSelectedColumn] = useState<string>('');
   const [showExplanation, setShowExplanation] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const [mainChart, setMainChart] = useState<ChartLocalSettings>({
+    xLabel: 'Pulse Number', yLabel: '', plotType: 'line', caption: '',
+  });
+  const [residualChart, setResidualChart] = useState<ChartLocalSettings>({
+    xLabel: 'Pulse Number', yLabel: 'Difference', plotType: 'line', caption: '',
+  });
 
   const testIds = Object.keys(uploadedTests);
   const currentTest = selectedTest ? uploadedTests[selectedTest] : null;
@@ -25,9 +34,10 @@ export function SmoothingPage() {
     if (currentTest) {
       const numCols = currentTest.dataset.columns.filter((c) => c.values.length > 0);
       if (numCols.length > 0 && !selectedColumn) {
-        // Try to pick a conductance-like column
         const condCol = numCols.find((c) => /conductance|cond|g_?us|^g$/i.test(c.name));
-        setSelectedColumn(condCol?.name || numCols[0].name);
+        const col = condCol?.name || numCols[0].name;
+        setSelectedColumn(col);
+        setMainChart((s) => ({ ...s, yLabel: col }));
       }
     }
   }, [currentTest, selectedColumn]);
@@ -108,7 +118,10 @@ export function SmoothingPage() {
           <label className="block text-xs text-text-muted mb-1">Column</label>
           <select
             value={selectedColumn}
-            onChange={(e) => setSelectedColumn(e.target.value)}
+            onChange={(e) => {
+              setSelectedColumn(e.target.value);
+              setMainChart((s) => ({ ...s, yLabel: e.target.value }));
+            }}
             className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text"
           >
             {currentTest?.dataset.columns
@@ -133,6 +146,7 @@ export function SmoothingPage() {
 
       {chartData.length > 0 && (
         <>
+          <ChartControls settings={mainChart} onChange={(s) => setMainChart((p) => ({ ...p, ...s }))} />
           <AppLineChart
             data={chartData}
             lines={[
@@ -140,23 +154,30 @@ export function SmoothingPage() {
               { dataKey: 'smoothed', color: '#4f8ff7', name: 'Smoothed' },
             ]}
             xKey="index"
-            xLabel="Pulse Number"
-            yLabel={selectedColumn}
+            xLabel={mainChart.xLabel}
+            yLabel={mainChart.yLabel}
             title="Raw vs Smoothed"
+            caption={mainChart.caption}
+            plotType={mainChart.plotType}
             id="smoothing-comparison"
           />
 
           {smoothingConfig.method !== 'none' && (
-            <AppLineChart
-              data={chartData}
-              lines={[{ dataKey: 'diff', color: '#a78bfa', name: 'Difference (Raw - Smoothed)' }]}
-              xKey="index"
-              xLabel="Pulse Number"
-              yLabel="Difference"
-              title="Residuals"
-              style={{ height: 200 }}
-              id="smoothing-residuals"
-            />
+            <>
+              <ChartControls settings={residualChart} onChange={(s) => setResidualChart((p) => ({ ...p, ...s }))} />
+              <AppLineChart
+                data={chartData}
+                lines={[{ dataKey: 'diff', color: '#a78bfa', name: 'Difference (Raw - Smoothed)' }]}
+                xKey="index"
+                xLabel={residualChart.xLabel}
+                yLabel={residualChart.yLabel}
+                title="Residuals"
+                caption={residualChart.caption}
+                plotType={residualChart.plotType}
+                heightOverride={200}
+                id="smoothing-residuals"
+              />
+            </>
           )}
         </>
       )}
