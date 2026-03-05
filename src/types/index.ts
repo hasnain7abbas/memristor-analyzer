@@ -23,11 +23,15 @@ export interface TestType {
 }
 
 export interface SmoothingConfig {
-  method: 'none' | 'moving_avg' | 'median' | 'savitzky_golay';
+  method: 'none' | 'moving_avg' | 'median' | 'savitzky_golay' | 'loess' | 'gaussian';
   windowSize: number;
   polyOrder: number;
   removeOutliers: boolean;
   outlierSigma: number;
+  strength: number;
+  enforceMonotonic: boolean;
+  monotonicDirection: 'increasing' | 'decreasing' | 'auto';
+  bandwidth: number;
 }
 
 export interface ExtractedParams {
@@ -50,9 +54,13 @@ export interface ExtractedParams {
   depressionSmoothed: number[];
   depressionFitted: number[];
   deltaG: { G: number; dG: number }[];
+  memoryWindow: number;
+  programmingMargin: number;
+  asymmetryIndex: number;
+  switchingUniformity: number;
 }
 
-export type ANNModelType = 'perceptron' | 'mlp_1h' | 'mlp_2h';
+export type ANNModelType = 'perceptron' | 'mlp_1h' | 'mlp_2h' | 'lenet5' | 'cnn_simple';
 
 export interface ANNConfig {
   modelType: ANNModelType;
@@ -112,4 +120,22 @@ export interface UploadedTest {
   dataset: Dataset;
   columnMapping: ColumnMapping;
   vRead?: number;
+}
+
+export type FrameworkType = 'pytorch' | 'crosssim' | 'neurosim' | 'memtorch';
+
+export interface FormulaSection {
+  subtitle: string;
+  content: string;
+}
+
+export interface FormulaDefinition {
+  title: string;
+  formula: string;
+  explanation: string;
+  example?: string;
+  highlight?: boolean;
+  sections?: FormulaSection[];
+  physicalMeaning?: string;
+  reference?: string;
 }

@@ -36,12 +36,22 @@ export function AppLineChart({
 
   const chartHeight = heightOverride ?? gs.height;
 
-  const handleExportSVG = useCallback(() => {
-    if (!chartRef.current) return;
+  const getSvgString = useCallback(() => {
+    if (!chartRef.current) return null;
     const svg = chartRef.current.querySelector('svg');
-    if (!svg) return;
+    if (!svg) return null;
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    clone.setAttribute('width', String(gs.width));
+    clone.setAttribute('height', String(chartHeight));
     const serializer = new XMLSerializer();
-    const svgStr = serializer.serializeToString(svg);
+    return serializer.serializeToString(clone);
+  }, [gs.width, chartHeight]);
+
+  const handleExportSVG = useCallback(() => {
+    const svgStr = getSvgString();
+    if (!svgStr) return;
     const blob = new Blob([svgStr], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -49,14 +59,11 @@ export function AppLineChart({
     a.download = `${id || 'chart'}.svg`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [id]);
+  }, [id, getSvgString]);
 
   const handleExportPNG = useCallback(() => {
-    if (!chartRef.current) return;
-    const svg = chartRef.current.querySelector('svg');
-    if (!svg) return;
-    const serializer = new XMLSerializer();
-    const svgStr = serializer.serializeToString(svg);
+    const svgStr = getSvgString();
+    if (!svgStr) return;
     const scale = gs.dpi / 96;
     const w = gs.width * scale;
     const h = chartHeight * scale;
@@ -68,8 +75,9 @@ export function AppLineChart({
     if (!ctx) return;
 
     const img = new Image();
-    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
+    // Use data URI to avoid canvas tainting from blob URLs
+    const b64 = btoa(unescape(encodeURIComponent(svgStr)));
+    const dataUri = `data:image/svg+xml;base64,${b64}`;
     img.onload = () => {
       ctx.fillStyle = gs.backgroundColor;
       ctx.fillRect(0, 0, w, h);
@@ -83,10 +91,9 @@ export function AppLineChart({
         a.click();
         URL.revokeObjectURL(u);
       }, 'image/png');
-      URL.revokeObjectURL(url);
     };
-    img.src = url;
-  }, [id, gs, chartHeight]);
+    img.src = dataUri;
+  }, [id, gs, chartHeight, getSvgString]);
 
   const getLineType = (pt: PlotType): 'monotone' | 'stepAfter' => {
     if (pt === 'step') return 'stepAfter';
@@ -112,29 +119,31 @@ export function AppLineChart({
 
   return (
     <div className="space-y-2" style={{ fontFamily: gs.fontFamily }}>
-      {title && (
-        <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between">
+        {title ? (
           <h3 style={{ fontSize: gs.titleFontSize, color: gs.axisColor, fontFamily: gs.fontFamily }} className="font-semibold">
             {title}
           </h3>
-          <div className="flex gap-1">
-            <button
-              onClick={handleExportSVG}
-              className="p-1.5 rounded text-text-dim hover:text-text hover:bg-surface-alt"
-              title="Export SVG"
-            >
-              <Download size={14} />
-            </button>
-            <button
-              onClick={handleExportPNG}
-              className="p-1.5 rounded text-text-dim hover:text-text hover:bg-surface-alt"
-              title="Export PNG"
-            >
-              <Download size={14} />
-            </button>
-          </div>
+        ) : <div />}
+        <div className="flex gap-1">
+          <button
+            onClick={handleExportSVG}
+            className="flex items-center gap-1 px-2 py-1 rounded text-text-dim hover:text-text hover:bg-surface-alt text-xs"
+            title="Export SVG"
+          >
+            <Download size={12} />
+            <span>SVG</span>
+          </button>
+          <button
+            onClick={handleExportPNG}
+            className="flex items-center gap-1 px-2 py-1 rounded text-text-dim hover:text-text hover:bg-surface-alt text-xs"
+            title="Export PNG"
+          >
+            <Download size={12} />
+            <span>PNG</span>
+          </button>
         </div>
-      )}
+      </div>
       <div
         ref={chartRef}
         style={{

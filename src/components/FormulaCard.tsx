@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import type { FormulaSection } from '../types';
 
 interface FormulaCardProps {
   title: string;
@@ -7,9 +8,12 @@ interface FormulaCardProps {
   explanation: string;
   example?: string;
   highlight?: boolean;
+  sections?: FormulaSection[];
+  physicalMeaning?: string;
+  reference?: string;
 }
 
-export function FormulaCard({ title, formula, explanation, example, highlight }: FormulaCardProps) {
+export function FormulaCard({ title, formula, explanation, example, highlight, sections, physicalMeaning, reference }: FormulaCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -36,6 +40,27 @@ export function FormulaCard({ title, formula, explanation, example, highlight }:
             {formula}
           </pre>
           <p className="text-sm text-text-muted leading-relaxed">{explanation}</p>
+
+          {sections && sections.length > 0 && (
+            <div className="space-y-2 mt-2">
+              {sections.map((sec, i) => (
+                <div key={i} className="border-l-2 border-accent/30 pl-3">
+                  <p className="text-xs font-medium text-accent mb-1">{sec.subtitle}</p>
+                  <pre className="font-mono text-xs text-text-muted whitespace-pre-wrap bg-bg/40 p-2 rounded">
+                    {sec.content}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {physicalMeaning && (
+            <div className="bg-purple/5 border border-purple/20 rounded-lg p-3">
+              <p className="text-xs font-medium text-purple mb-1">Physical Meaning</p>
+              <p className="text-xs text-text-muted leading-relaxed">{physicalMeaning}</p>
+            </div>
+          )}
+
           {example && (
             <div className="bg-green/5 border border-green/20 rounded-lg p-3">
               <p className="text-xs font-medium text-green mb-1">Worked Example</p>
@@ -43,6 +68,12 @@ export function FormulaCard({ title, formula, explanation, example, highlight }:
                 {example}
               </pre>
             </div>
+          )}
+
+          {reference && (
+            <p className="text-[11px] text-text-dim italic">
+              Ref: {reference}
+            </p>
           )}
         </div>
       )}

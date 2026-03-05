@@ -16,10 +16,12 @@ export function SmoothingControls() {
           <option value="moving_avg">Moving Average</option>
           <option value="median">Median Filter</option>
           <option value="savitzky_golay">Savitzky-Golay</option>
+          <option value="loess">LOESS/LOWESS</option>
+          <option value="gaussian">Gaussian Kernel</option>
         </select>
       </div>
 
-      {smoothingConfig.method !== 'none' && (
+      {smoothingConfig.method !== 'none' && smoothingConfig.method !== 'loess' && (
         <div>
           <label className="block text-xs text-text-muted mb-1">Window Size</label>
           <input
@@ -56,6 +58,40 @@ export function SmoothingControls() {
         </div>
       )}
 
+      {smoothingConfig.method === 'loess' && (
+        <div>
+          <label className="block text-xs text-text-muted mb-1">Bandwidth (0.05-0.9)</label>
+          <input
+            type="number"
+            min={0.05}
+            max={0.9}
+            step={0.05}
+            value={smoothingConfig.bandwidth}
+            onChange={(e) =>
+              setSmoothingConfig({ bandwidth: parseFloat(e.target.value) || 0.3 })
+            }
+            className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-24 font-mono"
+          />
+        </div>
+      )}
+
+      {smoothingConfig.method !== 'none' && (
+        <div>
+          <label className="block text-xs text-text-muted mb-1">
+            Strength: {smoothingConfig.strength.toFixed(2)}
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={smoothingConfig.strength}
+            onChange={(e) => setSmoothingConfig({ strength: parseFloat(e.target.value) })}
+            className="w-28 accent-accent"
+          />
+        </div>
+      )}
+
       <div className="flex items-center gap-2">
         <input
           type="checkbox"
@@ -83,6 +119,36 @@ export function SmoothingControls() {
             }
             className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-20 font-mono"
           />
+        </div>
+      )}
+
+      {smoothingConfig.method !== 'none' && (
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={smoothingConfig.enforceMonotonic}
+            onChange={(e) => setSmoothingConfig({ enforceMonotonic: e.target.checked })}
+            className="w-4 h-4 rounded border-border accent-accent"
+            id="mono-check"
+          />
+          <label htmlFor="mono-check" className="text-sm text-text-muted">
+            Enforce Monotonicity
+          </label>
+        </div>
+      )}
+
+      {smoothingConfig.enforceMonotonic && smoothingConfig.method !== 'none' && (
+        <div>
+          <label className="block text-xs text-text-muted mb-1">Direction</label>
+          <select
+            value={smoothingConfig.monotonicDirection}
+            onChange={(e) => setSmoothingConfig({ monotonicDirection: e.target.value as any })}
+            className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text"
+          >
+            <option value="auto">Auto-detect</option>
+            <option value="increasing">Increasing (P curve)</option>
+            <option value="decreasing">Decreasing (D curve)</option>
+          </select>
         </div>
       )}
     </div>

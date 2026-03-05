@@ -66,6 +66,10 @@ export const useAppStore = create<AppState>((set) => ({
     polyOrder: 2,
     removeOutliers: false,
     outlierSigma: 2.5,
+    strength: 1.0,
+    enforceMonotonic: false,
+    monotonicDirection: 'auto',
+    bandwidth: 0.3,
   },
   setSmoothingConfig: (config) =>
     set((s) => ({ smoothingConfig: { ...s.smoothingConfig, ...config } })),

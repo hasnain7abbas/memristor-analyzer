@@ -1,73 +1,116 @@
-# React + TypeScript + Vite
+# Memristor Neural Analyzer
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Desktop application for memristor researchers — upload experimental data, smooth it, extract device parameters, run MNIST ANN simulations, and export publication-quality charts.
 
-Currently, two official plugins are available:
+Built with **Tauri 2** + **React 19** + **TypeScript** + **Rust**.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Features
 
-## React Compiler
+### Data Upload
+- Support for 9 memristor test types (P/D, LTP/LTD, endurance, multilevel, EPSC, PPF, SDDP, SRDP, bipolar I-V)
+- CSV and Excel file parsing with automatic column detection
+- Interactive X/Y axis selection for preview charts
+- Current-to-conductance auto-conversion
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Smoothing
+- **Savitzky-Golay** with reflected boundary padding (no edge discontinuity)
+- **LOESS/LOWESS** — locally weighted regression, best for non-linear P/D patterns
+- **Gaussian kernel** smoothing
+- Moving average and median filter
+- **Monotonicity enforcement** via isotonic regression (pool adjacent violators)
+- Adjustable strength blending (0–100% mix of raw and smoothed)
+- Quality metrics: R² fit and shape preservation score
 
-## Expanding the ESLint configuration
+### Parameter Extraction
+- Non-linearity α (potentiation and depression) via grid search fitting
+- Conductance range (G_min, G_max), On/Off ratio
+- CCV%, write noise σ_w, multi-cycle support
+- Memory window (dB), programming margin (%), asymmetry index
+- Switching uniformity from ΔG vs G regression
+- Distinguishable conductance levels (not just data point count)
+- Detailed formula reference with physical derivations and literature references
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### ANN / MNIST Simulation
+- In-app training with synthetic MNIST (5,000 samples) using copy-and-degrade
+- Perceptron, MLP (1 hidden), MLP (2 hidden) architectures
+- LeNet-5 and CNN available via Python script export
+- Real-time accuracy vs epoch chart (ideal vs memristor)
+- Python script generators for 4 frameworks:
+  - **Custom PyTorch** — full MNIST training with copy-and-degrade
+  - **CrossSim** (Sandia National Labs) — crossbar array simulation
+  - **NeuroSim** (Georgia Tech) — device config + C++ parameter block
+  - **MemTorch** — PyTorch model patching with memristive devices
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### Export
+- Publication presets (Frontiers/Elsevier, Nature/Science, ACS, IEEE, presentation)
+- Full chart style customization (fonts, colors, line width, DPI, grid, borders)
+- Chart gallery with all generated charts and individual SVG/PNG download buttons
+- SVG export with proper xmlns for compatibility
+- PNG export at configurable DPI using data URI (no canvas tainting)
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## Tech Stack
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Layer | Technology |
+|-------|-----------|
+| Framework | Tauri 2.10 |
+| Frontend | React 19, TypeScript, Vite 7 |
+| Styling | Tailwind CSS 4 |
+| Charts | Recharts |
+| State | Zustand |
+| Backend | Rust (ndarray, calamine, csv) |
+| Icons | Lucide React |
+| File parsing | PapaParse, SheetJS (xlsx) |
+
+## Development
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) 22+
+- [Rust](https://rustup.rs/) stable
+- [Tauri CLI](https://v2.tauri.app/start/prerequisites/)
+
+### Setup
+
+```bash
+npm install
+npm run tauri dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Build
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run tauri build
 ```
+
+Produces `.msi` and `.exe` installers in `src-tauri/target/release/bundle/`.
+
+## Project Structure
+
+```
+memristor-analyzer/
+├── src/
+│   ├── components/        # Chart, FormulaCard, SmoothingControls, etc.
+│   ├── pages/             # Upload, Smoothing, Parameters, ANN, Export
+│   ├── stores/            # Zustand store (useAppStore)
+│   ├── types/             # TypeScript interfaces
+│   └── lib/               # File parser utilities
+├── src-tauri/
+│   └── src/
+│       ├── file_io.rs     # CSV/Excel file reading
+│       ├── smoothing.rs   # SG, LOESS, Gaussian, monotonic, median, MA
+│       ├── parameters.rs  # α fitting, CCV, write noise, num_levels
+│       ├── ann.rs         # MLP training with copy-and-degrade
+│       └── export.rs      # Python script generators (PyTorch, CrossSim, NeuroSim, MemTorch)
+└── .github/workflows/
+    ├── ci.yml             # TypeScript + Rust checks on push/PR
+    └── release.yml        # Auto-version bump + build + GitHub Release
+```
+
+## CI/CD
+
+- **CI** runs on every push and PR — validates TypeScript compilation and Rust checks
+- **Release** runs on push to main — auto-bumps patch version, builds Windows installers, creates GitHub Release with `.msi` and `.exe` attached
+
+## License
+
+MIT
