@@ -57,6 +57,14 @@ pub struct ExtractedParams {
     pub depression_fitted: Vec<f64>,
     #[serde(rename = "deltaG")]
     pub delta_g: Vec<DeltaGPoint>,
+    #[serde(rename = "memoryWindow")]
+    pub memory_window: f64,
+    #[serde(rename = "programmingMargin")]
+    pub programming_margin: f64,
+    #[serde(rename = "asymmetryIndex")]
+    pub asymmetry_index: f64,
+    #[serde(rename = "switchingUniformity")]
+    pub switching_uniformity: f64,
 }
 
 #[tauri::command]
@@ -134,6 +142,35 @@ pub fn extract_parameters(
         });
     }
 
+    // Compute num_levels as distinguishable levels: ΔG / mean_step_size
+    // Rather than just data point count
+    let num_levels_p = compute_num_levels(&p_smoothed);
+    let num_levels_d = compute_num_levels(&d_smoothed);
+
+    // Memory window in dB: 20·log10(Gmax/Gmin)
+    let memory_window = if g_min > 1e-15 {
+        20.0 * (g_max / g_min).log10()
+    } else {
+        0.0
+    };
+
+    // Programming margin: (Gmax - Gmin) / (Gmax + Gmin) × 100%
+    let programming_margin = if (g_max + g_min).abs() > 1e-15 {
+        (g_max - g_min) / (g_max + g_min) * 100.0
+    } else {
+        0.0
+    };
+
+    // Asymmetry index: |αP - αD| / max(αP, αD)
+    let asymmetry_index = if alpha_p.max(alpha_d) > 1e-10 {
+        (alpha_p - alpha_d).abs() / alpha_p.max(alpha_d)
+    } else {
+        0.0
+    };
+
+    // Switching uniformity from delta_g slope
+    let switching_uniformity = compute_switching_uniformity(&delta_g);
+
     Ok(ExtractedParams {
         g_min,
         g_max,
@@ -145,8 +182,8 @@ pub fn extract_parameters(
         r_squared_d,
         ccv_percent,
         write_noise,
-        num_levels_p: p_raw.len(),
-        num_levels_d: d_raw.len(),
+        num_levels_p,
+        num_levels_d,
         potentiation_raw: p_raw,
         potentiation_smoothed: p_smoothed,
         potentiation_fitted: p_fitted,
@@ -154,6 +191,10 @@ pub fn extract_parameters(
         depression_smoothed: d_smoothed,
         depression_fitted: d_fitted,
         delta_g,
+        memory_window,
+        programming_margin,
+        asymmetry_index,
+        switching_uniformity,
     })
 }
 
@@ -165,6 +206,10 @@ fn apply_smoothing(data: &[f64], config: &SmoothingConfigParam) -> Result<Vec<f6
         config.poly_order,
         config.remove_outliers,
         config.outlier_sigma,
+        None, // strength
+        None, // enforce_monotonic
+        None, // monotonic_direction
+        None, // bandwidth
     )
 }
 
@@ -330,4 +375,71 @@ fn compute_ccv_noise(
     };
 
     (ccv, write_noise)
+}
+
+/// Compute number of distinguishable conductance levels
+/// Uses the range divided by 2*sigma of step sizes
+fn compute_num_levels(data: &[f64]) -> usize {
+    if data.len() < 3 {
+        return data.len().max(2);
+    }
+
+    let g_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+    let g_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = g_max - g_min;
+
+    if range < 1e-15 {
+        return 2;
+    }
+
+    // Compute step sizes
+    let steps: Vec<f64> = data.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    if steps.is_empty() {
+        return 2;
+    }
+
+    let mean_step = steps.iter().sum::<f64>() / steps.len() as f64;
+    let n = steps.len() as f64;
+    let std_step = if steps.len() > 1 {
+        let var = steps.iter().map(|s| (s - mean_step).powi(2)).sum::<f64>() / (n - 1.0);
+        var.sqrt()
+    } else {
+        0.0
+    };
+
+    // Distinguishable levels = range / (mean_step + 2*sigma) to account for noise
+    let effective_step = mean_step + 2.0 * std_step;
+    if effective_step < 1e-15 {
+        return data.len().min(256).max(2);
+    }
+
+    let levels = (range / effective_step).round() as usize;
+    levels.max(2).min(256)
+}
+
+/// Compute switching uniformity index from delta_g data
+/// SUI = 1 - |slope| of linear regression of dG vs G
+fn compute_switching_uniformity(delta_g: &[DeltaGPoint]) -> f64 {
+    if delta_g.len() < 2 {
+        return 1.0;
+    }
+
+    let n = delta_g.len() as f64;
+    let mean_g = delta_g.iter().map(|p| p.g).sum::<f64>() / n;
+    let mean_dg = delta_g.iter().map(|p| p.dg).sum::<f64>() / n;
+
+    let mut ss_xx = 0.0;
+    let mut ss_xy = 0.0;
+    for p in delta_g {
+        ss_xx += (p.g - mean_g).powi(2);
+        ss_xy += (p.g - mean_g) * (p.dg - mean_dg);
+    }
+
+    let slope = if ss_xx.abs() > 1e-15 {
+        ss_xy / ss_xx
+    } else {
+        0.0
+    };
+
+    (1.0 - slope.abs()).clamp(0.0, 1.0)
 }

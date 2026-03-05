@@ -26,6 +26,9 @@ pub fn run() {
             parameters::extract_parameters,
             ann::train_ann,
             export::generate_python_script,
+            export::generate_crosssim_script,
+            export::generate_neurosim_script,
+            export::generate_memtorch_script,
             export::export_chart_data,
         ])
         .run(tauri::generate_context!())

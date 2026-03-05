@@ -150,6 +150,8 @@ function TestCard({ test }: { test: TestType }) {
   const { uploadedTests, setUploadedTest, removeUploadedTest, setIsCurrentInput } = useAppStore();
   const uploaded = uploadedTests[test.id];
   const [mapping, setMapping] = useState<ColumnMapping>({});
+  const [xCol, setXCol] = useState<string>('');
+  const [yCol, setYCol] = useState<string>('');
 
   const handleFileLoaded = (dataset: Dataset) => {
     const autoMap = autoMapColumns(dataset.headers, [
@@ -165,6 +167,13 @@ function TestCard({ test }: { test: TestType }) {
       setIsCurrentInput(true);
     }
 
+    // Default X/Y to first two required columns that are mapped
+    const numericCols = dataset.columns.filter((c) => c.values.length > 0).map((c) => c.name);
+    const mappedX = autoMap[test.requiredColumns[0]];
+    const mappedY = autoMap[test.requiredColumns[1]] || autoMap[test.requiredColumns[0]];
+    setXCol(mappedX && numericCols.includes(mappedX) ? mappedX : numericCols[0] || '');
+    setYCol(mappedY && numericCols.includes(mappedY) ? mappedY : (numericCols[1] || numericCols[0] || ''));
+
     setUploadedTest(test.id, {
       testId: test.id,
       dataset,
@@ -172,14 +181,24 @@ function TestCard({ test }: { test: TestType }) {
     });
   };
 
-  // Build preview chart data from first numeric column
+  // Build preview chart data from selected X/Y columns
   const previewChart = (() => {
     if (!uploaded) return null;
-    const numCol = uploaded.dataset.columns.find((c) => c.values.length > 0);
-    if (!numCol || numCol.values.length < 2) return null;
-    const chartData = numCol.values.map((v, i) => ({ index: i + 1, [numCol.name]: v }));
-    return { data: chartData, dataKey: numCol.name };
+    const ds = uploaded.dataset;
+    const xColumn = ds.columns.find((c) => c.name === xCol);
+    const yColumn = ds.columns.find((c) => c.name === yCol);
+    if (!xColumn || !yColumn || xColumn.values.length < 2) return null;
+
+    const chartData = xColumn.values.map((xVal, i) => ({
+      [xCol]: xVal,
+      [yCol]: yColumn.values[i] ?? 0,
+    }));
+    return { data: chartData, xKey: xCol, yKey: yCol };
   })();
+
+  const numericHeaders = uploaded
+    ? uploaded.dataset.columns.filter((c) => c.values.length > 0).map((c) => c.name)
+    : [];
 
   return (
     <div
@@ -286,6 +305,36 @@ function TestCard({ test }: { test: TestType }) {
                 ))}
               </div>
 
+              {/* X/Y axis selectors for chart */}
+              {numericHeaders.length > 0 && (
+                <div className="flex gap-3 pt-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-text-dim font-medium">X axis:</span>
+                    <select
+                      value={xCol}
+                      onChange={(e) => setXCol(e.target.value)}
+                      className="bg-surface-alt border border-border rounded px-2 py-1 text-xs text-text"
+                    >
+                      {numericHeaders.map((h) => (
+                        <option key={h} value={h}>{h}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-text-dim font-medium">Y axis:</span>
+                    <select
+                      value={yCol}
+                      onChange={(e) => setYCol(e.target.value)}
+                      className="bg-surface-alt border border-border rounded px-2 py-1 text-xs text-text"
+                    >
+                      {numericHeaders.map((h) => (
+                        <option key={h} value={h}>{h}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
               <DataTable
                 headers={uploaded.dataset.headers}
                 rows={uploaded.dataset.rows}
@@ -296,12 +345,13 @@ function TestCard({ test }: { test: TestType }) {
               {previewChart && (
                 <AppLineChart
                   data={previewChart.data}
-                  lines={[{ dataKey: previewChart.dataKey, color: '#4f8ff7', name: previewChart.dataKey }]}
-                  xKey="index"
-                  xLabel="Index"
-                  yLabel={previewChart.dataKey}
+                  lines={[{ dataKey: previewChart.yKey, color: '#4f8ff7', name: previewChart.yKey }]}
+                  xKey={previewChart.xKey}
+                  xLabel={previewChart.xKey}
+                  yLabel={previewChart.yKey}
+                  title={test.name}
                   heightOverride={200}
-                  id={`preview-${test.id}`}
+                  id={`upload-${test.id}`}
                 />
               )}
             </div>

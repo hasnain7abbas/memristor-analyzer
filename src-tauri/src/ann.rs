@@ -367,7 +367,7 @@ fn train_ann_inner(
     let mut rng = StdRng::seed_from_u64(42);
 
     // Generate data
-    let (train_data, test_data) = generate_synthetic_mnist(3000, 600, &mut rng);
+    let (train_data, test_data) = generate_synthetic_mnist(5000, 1000, &mut rng);
 
     // Build sizes array based on model type
     let sizes: Vec<usize> = match config.model_type.as_str() {

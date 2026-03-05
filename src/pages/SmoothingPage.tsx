@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../stores/useAppStore';
 import { SmoothingControls } from '../components/SmoothingControls';
@@ -6,6 +6,29 @@ import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
 import { Info } from 'lucide-react';
 import type { ChartLocalSettings } from '../types';
+
+function computeR2(raw: number[], smoothed: number[]): number {
+  if (raw.length < 2 || raw.length !== smoothed.length) return 0;
+  const mean = raw.reduce((a, b) => a + b, 0) / raw.length;
+  const ssTot = raw.reduce((a, v) => a + (v - mean) ** 2, 0);
+  const ssRes = raw.reduce((a, v, i) => a + (v - smoothed[i]) ** 2, 0);
+  return ssTot > 1e-15 ? 1 - ssRes / ssTot : 0;
+}
+
+function computeShapePreservation(raw: number[], smoothed: number[]): number {
+  // Measures how well the smoothed curve preserves the derivative sign pattern
+  if (raw.length < 3) return 1;
+  let matchCount = 0;
+  let total = 0;
+  for (let i = 1; i < raw.length; i++) {
+    const rawSign = Math.sign(raw[i] - raw[i - 1]);
+    const smSign = Math.sign(smoothed[i] - smoothed[i - 1]);
+    if (rawSign === 0 || smSign === 0) continue;
+    total++;
+    if (rawSign === smSign) matchCount++;
+  }
+  return total > 0 ? matchCount / total : 1;
+}
 
 export function SmoothingPage() {
   const { uploadedTests, smoothingConfig, smoothedData, setSmoothedData } = useAppStore();
@@ -57,6 +80,10 @@ export function SmoothingPage() {
           polyOrder: smoothingConfig.method === 'savitzky_golay' ? smoothingConfig.polyOrder : null,
           removeOutliers: smoothingConfig.removeOutliers,
           outlierSigma: smoothingConfig.outlierSigma,
+          strength: smoothingConfig.strength,
+          enforceMonotonic: smoothingConfig.enforceMonotonic,
+          monotonicDirection: smoothingConfig.monotonicDirection,
+          bandwidth: smoothingConfig.bandwidth,
         });
         setSmoothedData(`${selectedTest}_${selectedColumn}`, result);
       } catch (e) {
@@ -85,6 +112,9 @@ export function SmoothingPage() {
     smoothed: smooth[i] ?? val,
     diff: smooth[i] != null ? val - smooth[i] : 0,
   }));
+
+  const r2 = useMemo(() => computeR2(rawData, smooth), [rawData, smooth]);
+  const shapeScore = useMemo(() => computeShapePreservation(rawData, smooth), [rawData, smooth]);
 
   return (
     <div className="space-y-6">
@@ -144,6 +174,24 @@ export function SmoothingPage() {
         </div>
       )}
 
+      {/* Quality metrics */}
+      {smooth.length > 0 && smoothingConfig.method !== 'none' && (
+        <div className="flex gap-4">
+          <div className="px-3 py-2 bg-surface rounded-lg border border-border">
+            <span className="text-xs text-text-muted">R² (fit quality): </span>
+            <span className={`text-sm font-mono font-medium ${r2 >= 0.95 ? 'text-green' : r2 >= 0.8 ? 'text-amber' : 'text-red'}`}>
+              {r2.toFixed(4)}
+            </span>
+          </div>
+          <div className="px-3 py-2 bg-surface rounded-lg border border-border">
+            <span className="text-xs text-text-muted">Shape preservation: </span>
+            <span className={`text-sm font-mono font-medium ${shapeScore >= 0.8 ? 'text-green' : shapeScore >= 0.6 ? 'text-amber' : 'text-red'}`}>
+              {(shapeScore * 100).toFixed(1)}%
+            </span>
+          </div>
+        </div>
+      )}
+
       {chartData.length > 0 && (
         <>
           <ChartControls settings={mainChart} onChange={(s) => setMainChart((p) => ({ ...p, ...s }))} />
@@ -194,10 +242,25 @@ export function SmoothingPage() {
         {showExplanation && (
           <div className="px-4 pb-4 space-y-3 text-sm text-text-muted">
             <div>
-              <p className="font-medium text-cyan">Savitzky-Golay (Recommended)</p>
+              <p className="font-medium text-cyan">Savitzky-Golay (Recommended for general use)</p>
               <p>
                 Fits local polynomials to preserve peak shapes while removing noise. Window 5-7 with
-                order 2 works for most memristor data.
+                order 2 works for most memristor data. Uses reflected boundary padding to eliminate edge discontinuities.
+              </p>
+            </div>
+            <div>
+              <p className="font-medium text-cyan">LOESS/LOWESS (Best for non-linear patterns)</p>
+              <p>
+                Locally weighted scatterplot smoothing. Uses tricube weights and local linear regression.
+                Bandwidth controls the fraction of data used for each local fit (0.1 = more detail, 0.5 = smoother).
+                Best for preserving sigmoid/saturation patterns in P/D curves.
+              </p>
+            </div>
+            <div>
+              <p className="font-medium text-cyan">Gaussian Kernel</p>
+              <p>
+                Gaussian-weighted moving average. Preserves shape better than simple moving average because
+                center points are weighted more heavily. Window size controls the spread of the Gaussian.
               </p>
             </div>
             <div>
@@ -211,6 +274,21 @@ export function SmoothingPage() {
               <p>
                 Replaces each point with the median of its neighbors. Best for removing single-point
                 spike artifacts.
+              </p>
+            </div>
+            <div>
+              <p className="font-medium text-cyan">Monotonicity Enforcement</p>
+              <p>
+                Uses isotonic regression (pool adjacent violators algorithm) to enforce that the smoothed
+                curve is monotonically increasing or decreasing. Critical for memristor P/D data where
+                potentiation should always increase and depression should always decrease.
+              </p>
+            </div>
+            <div>
+              <p className="font-medium text-cyan">Strength Blending</p>
+              <p>
+                Controls how much smoothing is applied: 0.0 = raw data, 1.0 = fully smoothed.
+                Values in between linearly blend raw and smoothed data.
               </p>
             </div>
             <div>

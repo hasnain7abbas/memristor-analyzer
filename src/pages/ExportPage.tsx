@@ -1,4 +1,5 @@
 import { useAppStore } from '../stores/useAppStore';
+import { AppLineChart } from '../components/Chart';
 
 const PRESETS = [
   { name: 'Frontiers/Elsevier (single col)', width: 600, height: 450, fontFamily: 'Times New Roman', axisFontSize: 12, titleFontSize: 14, tickFontSize: 11, dpi: 300 },
@@ -10,7 +11,7 @@ const PRESETS = [
 ];
 
 export function ExportPage() {
-  const { graphStyle, setGraphStyle } = useAppStore();
+  const { graphStyle, setGraphStyle, extractedParams, annResults, uploadedTests, smoothedData } = useAppStore();
 
   const applyPreset = (preset: typeof PRESETS[0]) => {
     setGraphStyle({
@@ -24,12 +25,64 @@ export function ExportPage() {
     });
   };
 
+  // Build chart data for gallery
+  const pdChartData = extractedParams
+    ? [
+        ...extractedParams.potentiationSmoothed.map((v: number, i: number) => ({
+          index: i + 1,
+          potSmoothed: v as number | undefined,
+          potFitted: extractedParams.potentiationFitted[i] as number | undefined,
+          depSmoothed: undefined as number | undefined,
+          depFitted: undefined as number | undefined,
+        })),
+        ...extractedParams.depressionSmoothed.map((v: number, i: number) => ({
+          index: extractedParams.potentiationSmoothed.length + i + 1,
+          potSmoothed: undefined as number | undefined,
+          potFitted: undefined as number | undefined,
+          depSmoothed: v as number | undefined,
+          depFitted: extractedParams.depressionFitted[i] as number | undefined,
+        })),
+      ]
+    : [];
+
+  const deltaGData = extractedParams
+    ? extractedParams.deltaG.map((d: { G: number; dG: number }) => ({ G: d.G, dG: d.dG }))
+    : [];
+
+  const accChartData = annResults.map((r) => ({
+    epoch: r.epoch,
+    ideal: r.idealAccuracy,
+    memristor: r.memristorAccuracy,
+  }));
+
+  // Build smoothing chart from first available
+  const testIds = Object.keys(uploadedTests);
+  let smoothingChartData: Record<string, unknown>[] = [];
+  let smoothingColName = '';
+  if (testIds.length > 0) {
+    const firstTest = uploadedTests[testIds[0]];
+    const numCols = firstTest.dataset.columns.filter((c) => c.values.length > 0);
+    const condCol = numCols.find((c) => /conductance|cond|g_?us|^g$/i.test(c.name)) || numCols[0];
+    if (condCol) {
+      smoothingColName = condCol.name;
+      const key = `${testIds[0]}_${condCol.name}`;
+      const smooth = smoothedData[key] || [];
+      smoothingChartData = condCol.values.map((val, i) => ({
+        index: i + 1,
+        raw: val,
+        smoothed: smooth[i] ?? val,
+      }));
+    }
+  }
+
+  const hasAnyChart = pdChartData.length > 0 || deltaGData.length > 0 || accChartData.length > 0 || smoothingChartData.length > 0;
+
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-text mb-1">Export Settings</h2>
         <p className="text-sm text-text-muted">
-          Configure chart export settings for publication-quality figures. Use the download buttons on each chart.
+          Configure chart export settings for publication-quality figures. Each chart below has SVG/PNG download buttons.
         </p>
       </div>
 
@@ -251,13 +304,78 @@ export function ExportPage() {
         </div>
       </div>
 
-      <div className="bg-surface-alt rounded-xl border border-border p-4 text-sm text-text-muted">
-        <p className="font-medium text-text mb-2">How to export charts</p>
-        <p>
-          Each chart throughout the app has SVG/PNG download buttons in the top-right corner.
-          Configure your desired settings here, then use the download buttons on the Smoothing,
-          Parameters, or ANN pages to export individual charts.
+      {/* Chart Gallery */}
+      <div className="space-y-4">
+        <h3 className="text-sm font-medium text-text">Chart Gallery — Preview & Export</h3>
+        <p className="text-xs text-text-muted">
+          All available charts are rendered below with current export settings. Use the SVG/PNG buttons on each chart to download.
         </p>
+
+        {!hasAnyChart && (
+          <div className="bg-surface-alt rounded-xl border border-border p-8 text-center text-text-dim text-sm">
+            No charts available yet. Upload data and extract parameters to see charts here.
+          </div>
+        )}
+
+        {smoothingChartData.length > 0 && (
+          <AppLineChart
+            data={smoothingChartData}
+            lines={[
+              { dataKey: 'raw', color: '#8494b2', name: 'Raw', dot: true, type: 'dotted' },
+              { dataKey: 'smoothed', color: '#4f8ff7', name: 'Smoothed' },
+            ]}
+            xKey="index"
+            xLabel="Pulse Number"
+            yLabel={smoothingColName}
+            title="Raw vs Smoothed Data"
+            id="export-smoothing"
+          />
+        )}
+
+        {pdChartData.length > 0 && (
+          <AppLineChart
+            data={pdChartData}
+            lines={[
+              { dataKey: 'potSmoothed', color: '#34d399', name: 'P Smoothed' },
+              { dataKey: 'potFitted', color: '#34d399', name: 'P Fitted', type: 'dashed' },
+              { dataKey: 'depSmoothed', color: '#f87171', name: 'D Smoothed' },
+              { dataKey: 'depFitted', color: '#f87171', name: 'D Fitted', type: 'dashed' },
+            ]}
+            xKey="index"
+            xLabel="Pulse Number"
+            yLabel="Conductance (µS)"
+            title="Potentiation / Depression Curves"
+            id="export-pd-curves"
+          />
+        )}
+
+        {deltaGData.length > 0 && (
+          <AppLineChart
+            data={deltaGData}
+            lines={[{ dataKey: 'dG', color: '#a78bfa', name: 'ΔG' }]}
+            xKey="G"
+            xLabel="G (µS)"
+            yLabel="ΔG (µS)"
+            title="ΔG vs G — Switching Statistics"
+            plotType="scatter"
+            id="export-delta-g"
+          />
+        )}
+
+        {accChartData.length > 0 && (
+          <AppLineChart
+            data={accChartData}
+            lines={[
+              { dataKey: 'ideal', color: '#4f8ff7', name: 'Ideal' },
+              { dataKey: 'memristor', color: '#f87171', name: 'Memristor' },
+            ]}
+            xKey="epoch"
+            xLabel="Epoch"
+            yLabel="Accuracy (%)"
+            title="ANN Accuracy vs Epoch"
+            id="export-ann-accuracy"
+          />
+        )}
       </div>
     </div>
   );

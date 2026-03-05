@@ -5,9 +5,9 @@ import { FormulaCard } from '../components/FormulaCard';
 import { StatCard } from '../components/StatCard';
 import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
-import type { ChartLocalSettings } from '../types';
+import type { ChartLocalSettings, FormulaDefinition } from '../types';
 
-const FORMULAS = [
+const FORMULAS: FormulaDefinition[] = [
   {
     title: 'Step 1: Current → Conductance',
     formula: 'G = I_read / V_read\n\nG (µS) = I (µA) / V (V)',
@@ -15,6 +15,22 @@ const FORMULAS = [
       'If your Keithley records current (µA) at a fixed read voltage, divide to get conductance in µS (microsiemens).',
     example:
       'I_read = 50 µA, V_read = 0.1 V\nG = 50 / 0.1 = 500 µS',
+    sections: [
+      {
+        subtitle: "Ohm's Law Derivation",
+        content: 'V = IR → I = GV → G = I/V\nwhere G = 1/R is the conductance',
+      },
+      {
+        subtitle: 'Unit Conversion Table',
+        content: 'A → µA:  ×10⁶    |  S → µS:  ×10⁶\nA → mA:  ×10³    |  S → mS:  ×10³\nA → nA:  ×10⁹    |  S → nS:  ×10⁹',
+      },
+      {
+        subtitle: 'Contact Resistance Note',
+        content: 'G_measured = G_device + G_contact\nFor 2-probe: subtract contact resistance\nFor 4-probe (Kelvin): G_measured ≈ G_device',
+      },
+    ],
+    physicalMeaning: 'Conductance represents the ease of charge carrier flow through the memristive filament. In filamentary memristors, G is proportional to the cross-sectional area of the conductive filament.',
+    reference: 'L. Chua, "Memristor — The Missing Circuit Element," IEEE Trans. Circuit Theory, 1971',
   },
   {
     title: 'Step 2: G_min, G_max, On/Off Ratio',
@@ -23,6 +39,21 @@ const FORMULAS = [
     explanation:
       'The conductance window between LRS and HRS. Larger windows give more analog levels for the ANN.',
     example: 'G_min = 10 µS, G_max = 100 µS\nOn/Off = 10.0, ΔG = 90 µS',
+    sections: [
+      {
+        subtitle: 'Memory Window (dB)',
+        content: 'MW = 20·log₁₀(G_max / G_min)\n\nExample: G_max/G_min = 10 → MW = 20 dB',
+      },
+      {
+        subtitle: 'Number of Distinguishable Levels',
+        content: 'N = ΔG / (mean_step + 2·σ_step)\n≈ 1 / (2·σ_w) for normalized noise\n\nHigher N → more bits per synapse',
+      },
+      {
+        subtitle: 'Programming Margin',
+        content: 'PM = (G_max - G_min) / (G_max + G_min) × 100%\n\nPM > 50%: good separation\nPM < 20%: poor, risk of read errors',
+      },
+    ],
+    physicalMeaning: 'G_min corresponds to the high-resistance state (HRS, thin/ruptured filament) and G_max to the low-resistance state (LRS, thick/connected filament). The On/Off ratio determines the signal-to-noise margin for weight storage.',
   },
   {
     title: 'Step 3: Non-Linearity α — THE KEY PARAMETER',
@@ -33,6 +64,22 @@ const FORMULAS = [
     example:
       'If α_P = 1.5 and α_D = 2.0:\nMild non-linearity. Expect ~5-15% accuracy drop vs ideal.',
     highlight: true,
+    sections: [
+      {
+        subtitle: 'Physical Model Derivation',
+        content: 'Kinetic equation: dG/dn = β·(G_end - G)^γ\nSolution: G(n) = G_start + (G_end-G_start)·[1-exp(-α·n/N)]/[1-exp(-α)]\n\nPhysical origin: ion drift velocity saturation\nin the filament region',
+      },
+      {
+        subtitle: 'Impact on ANN Accuracy',
+        content: 'α < 1:  < 5% accuracy drop (excellent)\nα = 1-2: 5-15% drop (acceptable)\nα = 2-4: 15-30% drop (degraded)\nα > 4:  > 30% drop (poor, needs compensation)',
+      },
+      {
+        subtitle: 'Asymmetry Index',
+        content: 'AI = |α_P - α_D| / max(α_P, α_D)\n\nAI = 0: perfectly symmetric (ideal)\nAI > 0.5: highly asymmetric (problematic)\n\nAsymmetry causes weight drift during training',
+      },
+    ],
+    physicalMeaning: 'The non-linearity arises from the electric field distribution within the switching layer. As the filament grows (potentiation), the field concentrates at the tip causing rapid initial growth that saturates. Depression non-linearity comes from the reverse process of filament dissolution.',
+    reference: 'G. W. Burr et al., "Neuromorphic computing using non-volatile memory," Advances in Physics: X, 2017',
   },
   {
     title: 'Step 4: CCV & Write Noise',
@@ -42,18 +89,56 @@ const FORMULAS = [
       'Cycle-to-cycle variation (CCV) measures how reproducible each weight update is. Write noise σ_w is the normalized standard deviation of conductance changes.',
     example:
       'mean(|ΔG|) = 2.0 µS, std(|ΔG|) = 0.5 µS\nCCV = 0.5/2.0 × 100 = 25%\nσ_w = 0.5/90 = 0.0056',
+    sections: [
+      {
+        subtitle: 'Statistical Derivation',
+        content: 'CCV from binomial model of filament formation:\nP(ΔG) ~ N(µ_ΔG, σ²_ΔG)\nCCV = σ_ΔG / µ_ΔG (coefficient of variation)',
+      },
+      {
+        subtitle: 'Device Area Scaling',
+        content: 'σ_w ∝ 1/√A  (A = device area)\n\nSmaller devices → more noise\nTypical: 50nm device → σ_w ≈ 0.01-0.05\n         1µm device  → σ_w ≈ 0.001-0.01',
+      },
+      {
+        subtitle: 'Multi-Cycle Formula',
+        content: 'CCV_mc = √(CCV²_intra + CCV²_inter)\n\nCCV_intra: variation within single cycle\nCCV_inter: variation between cycles\n(requires multi-cycle data)',
+      },
+    ],
+    physicalMeaning: 'Write noise originates from the stochastic nature of ion migration and filament formation/dissolution. Each write pulse causes a slightly different atomic rearrangement, leading to conductance variations. The binomial nature reflects the discrete number of atoms involved in switching.',
   },
   {
     title: 'Step 5: ΔG vs G Scatter Plot',
     formula: 'For each pulse i:\n  x = G[i]\n  y = G[i+1] - G[i]\n\nPlot (x, y) for all potentiation and depression pulses.',
     explanation:
       'This scatter plot reveals the state-dependent switching behavior. Ideally, ΔG should be constant (horizontal line). A slope indicates non-linearity.',
+    sections: [
+      {
+        subtitle: 'State-Dependent Model',
+        content: 'Potentiation: ΔG(G) = α_eff · (G_max - G)\nDepression:   ΔG(G) = -α_eff · (G - G_min)\n\nSlope of ΔG vs G = -α_eff\nIdeal (linear): slope = 0',
+      },
+      {
+        subtitle: 'Switching Uniformity Index',
+        content: 'SUI = 1 - |slope of ΔG vs G regression|\n\nSUI = 1: perfectly uniform (linear device)\nSUI < 0.5: highly non-uniform (non-linear)',
+      },
+    ],
+    physicalMeaning: 'A negative slope in ΔG vs G for potentiation means the device updates less as it approaches G_max (saturation behavior). This is the physical manifestation of non-linearity α and directly impacts weight update precision at extreme conductance states.',
   },
   {
     title: 'Step 6: PPF Index',
-    formula: 'PPF Index = (A2 - A1) / A1 × 100%\n\nDouble exponential fit:\nPPF(Δt) = C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)',
+    formula: 'PPF Index = (A2 - A1) / A1 × 100%\n\nDouble exponential fit:\nPPF(Δt) = 1 + C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)',
     explanation:
       'Paired-pulse facilitation measures short-term synaptic plasticity. τ₁ and τ₂ correspond to fast and slow decay timescales.',
+    sections: [
+      {
+        subtitle: 'Full Double Exponential Model',
+        content: 'PPF(Δt) = 1 + C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)\n\nC₁, C₂: amplitude coefficients\nτ₁ (fast): 50-200 ms (Ca²⁺ diffusion)\nτ₂ (slow): 1-10 s (structural relaxation)',
+      },
+      {
+        subtitle: 'Biological Comparison',
+        content: 'Hippocampal synapse:\n  τ₁ ≈ 50 ms, τ₂ ≈ 500 ms\n\nMemristor (typical):\n  τ₁ ≈ 100-500 ms, τ₂ ≈ 2-20 s\n\nCloser to biological = better for\nneuromorphic temporal processing',
+      },
+    ],
+    physicalMeaning: 'PPF in memristors arises from residual ion concentration near the filament tip after the first pulse. The second pulse encounters a pre-conditioned switching layer, requiring less energy for the same conductance change. This mimics biological short-term plasticity governed by Ca²⁺ dynamics.',
+    reference: 'R. Zucker & W. Regehr, "Short-term synaptic plasticity," Annu. Rev. Physiol., 2002',
   },
 ];
 
@@ -275,6 +360,20 @@ export function ParametersPage() {
             />
             <StatCard label="CCV" value={extractedParams.ccvPercent.toFixed(2)} unit="%" />
             <StatCard label="σ_w (Write Noise)" value={extractedParams.writeNoise.toFixed(6)} />
+            <StatCard label="N Levels (P)" value={String(extractedParams.numLevelsP)} />
+            <StatCard label="N Levels (D)" value={String(extractedParams.numLevelsD)} />
+            <StatCard label="Memory Window" value={extractedParams.memoryWindow.toFixed(1)} unit="dB" />
+            <StatCard label="Prog. Margin" value={extractedParams.programmingMargin.toFixed(1)} unit="%" />
+            <StatCard
+              label="Asymmetry Index"
+              value={extractedParams.asymmetryIndex.toFixed(3)}
+              quality={extractedParams.asymmetryIndex < 0.3 ? 'good' : extractedParams.asymmetryIndex < 0.5 ? 'ok' : 'poor'}
+            />
+            <StatCard
+              label="Switching Uniformity"
+              value={extractedParams.switchingUniformity.toFixed(3)}
+              quality={extractedParams.switchingUniformity > 0.7 ? 'good' : extractedParams.switchingUniformity > 0.5 ? 'ok' : 'poor'}
+            />
           </div>
 
           {pdChartData.length > 0 && (
