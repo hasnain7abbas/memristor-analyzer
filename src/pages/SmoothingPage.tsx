@@ -97,8 +97,12 @@ export function SmoothingPage() {
 
   if (testIds.length === 0) {
     return (
-      <div className="text-center py-20 text-text-muted">
-        <p>No data uploaded yet. Go to the Upload tab first.</p>
+      <div className="text-center py-20 text-text-muted space-y-2">
+        <p className="text-lg font-medium">No data uploaded yet</p>
+        <p className="text-sm">
+          Go to the <span className="text-accent font-medium">Upload</span> tab to load your measurement data,
+          or use the <span className="text-purple font-medium">Load Demo Data</span> button to test the pipeline.
+        </p>
       </div>
     );
   }

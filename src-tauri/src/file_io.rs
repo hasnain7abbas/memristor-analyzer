@@ -146,16 +146,47 @@ fn read_excel(path: &str, sheet_name: Option<String>) -> Result<DatasetJson, Str
         }
     }
 
+    if rows.is_empty() {
+        return Err(format!(
+            "No data rows found in sheet '{}'. Found {} column headers: [{}]. \
+             The sheet may be empty — check that your instrument recorded data correctly.",
+            sheet,
+            headers.len(),
+            headers.join(", ")
+        ));
+    }
+
     Ok(DatasetJson { headers, rows })
 }
 
 fn read_csv(path: &str, delimiter: u8) -> Result<DatasetJson, String> {
+    // Read the entire file to handle metadata rows before headers
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Err("File is empty".to_string());
+    }
+
+    // Strategy: find the header row by looking for the first line where
+    // most fields look like column headers (not metadata key-value pairs).
+    // Keithley instruments often output metadata lines like "Test Type\tIV Sweep"
+    // before the actual column headers.
+    let header_line_idx = find_header_line(&lines, delimiter);
+
+    // Build a CSV reader from the remaining content (header + data)
+    let remaining: String = lines[header_line_idx..]
+        .iter()
+        .map(|l| *l)
+        .collect::<Vec<&str>>()
+        .join("\n");
+
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .flexible(true)
         .has_headers(true)
-        .from_path(path)
-        .map_err(|e| format!("Cannot open CSV file: {}", e))?;
+        .from_reader(remaining.as_bytes());
 
     let headers: Vec<String> = rdr
         .headers()
@@ -174,8 +205,12 @@ fn read_csv(path: &str, delimiter: u8) -> Result<DatasetJson, String> {
 
     let mut rows = Vec::new();
     for result in rdr.records() {
-        let record = result.map_err(|e| format!("Error reading row: {}", e))?;
+        let record = match result {
+            Ok(r) => r,
+            Err(_) => continue, // Skip malformed rows
+        };
         let mut map = HashMap::new();
+        let mut has_numeric = false;
         for (i, field) in record.iter().enumerate() {
             if i >= headers.len() {
                 break;
@@ -184,6 +219,7 @@ fn read_csv(path: &str, delimiter: u8) -> Result<DatasetJson, String> {
             let value = if trimmed.is_empty() {
                 serde_json::Value::Null
             } else if let Ok(f) = trimmed.parse::<f64>() {
+                has_numeric = true;
                 serde_json::Value::Number(
                     serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)),
                 )
@@ -192,8 +228,79 @@ fn read_csv(path: &str, delimiter: u8) -> Result<DatasetJson, String> {
             };
             map.insert(headers[i].clone(), value);
         }
-        rows.push(map);
+        // Only include rows that have at least one numeric value
+        // This filters out stray metadata or comment rows below headers
+        if has_numeric {
+            rows.push(map);
+        }
+    }
+
+    if rows.is_empty() {
+        return Err(format!(
+            "No numeric data found in file. Found {} column headers: [{}]. \
+             Check that the file contains actual measurement data.",
+            headers.len(),
+            headers.join(", ")
+        ));
     }
 
     Ok(DatasetJson { headers, rows })
+}
+
+/// Find the header line index by scoring each line.
+/// The header line should have multiple fields and few/no pure numbers.
+/// Metadata lines typically have 1-2 fields (key-value pairs) or are all text.
+fn find_header_line(lines: &[&str], delimiter: u8) -> usize {
+    let delim_char = delimiter as char;
+    let mut best_idx = 0;
+    let mut best_score = 0i32;
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(delim_char).collect();
+        let num_fields = fields.len();
+
+        // Skip lines with only 1-2 fields (likely metadata key:value)
+        if num_fields < 2 {
+            continue;
+        }
+
+        // Score: prefer lines with more fields where most fields are text (headers)
+        let num_text = fields
+            .iter()
+            .filter(|f| {
+                let t = f.trim();
+                !t.is_empty() && t.parse::<f64>().is_err()
+            })
+            .count();
+        let num_numeric = fields
+            .iter()
+            .filter(|f| f.trim().parse::<f64>().is_ok())
+            .count();
+
+        // A good header row: many text fields, few/no numeric fields, many columns
+        let score = (num_text as i32 * 3) + (num_fields as i32) - (num_numeric as i32 * 5);
+
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+
+        // If we've found a line that looks like headers, check if the next line has data
+        if num_text >= 2 && num_numeric == 0 && i + 1 < lines.len() {
+            let next_fields: Vec<&str> = lines[i + 1].split(delim_char).collect();
+            let next_numeric = next_fields
+                .iter()
+                .filter(|f| f.trim().parse::<f64>().is_ok())
+                .count();
+            // If next line has numeric data, this is very likely the header
+            if next_numeric >= 1 {
+                return i;
+            }
+        }
+    }
+
+    best_idx
 }

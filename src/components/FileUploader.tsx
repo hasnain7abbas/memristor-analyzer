@@ -40,6 +40,12 @@ export function FileUploader({ onFileLoaded, accept }: FileUploaderProps) {
           { path, sheetName: sheetName || null },
         );
 
+        if (!result.rows || result.rows.length === 0) {
+          setError('File contains no data rows. Check that your instrument recorded data correctly.');
+          setLoading(false);
+          return;
+        }
+
         const filename = path.split(/[\\/]/).pop() || path;
         const columns = result.headers.map((h) => ({
           name: h,
@@ -50,6 +56,18 @@ export function FileUploader({ onFileLoaded, accept }: FileUploaderProps) {
             })
             .filter((v) => !isNaN(v)),
         }));
+
+        // Check if any column has numeric data
+        const hasNumericData = columns.some((c) => c.values.length > 0);
+        if (!hasNumericData) {
+          setError(
+            `File loaded ${result.rows.length} rows but no numeric data found. ` +
+            `Headers: [${result.headers.join(', ')}]. ` +
+            `Check that your data contains numeric measurement values.`
+          );
+          setLoading(false);
+          return;
+        }
 
         const dataset: Dataset = {
           filename,

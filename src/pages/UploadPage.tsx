@@ -362,17 +362,90 @@ function TestCard({ test }: { test: TestType }) {
   );
 }
 
+function generateDemoData(): { dataset: import('../types').Dataset; mapping: ColumnMapping } {
+  // Simulate a realistic P/D conductance curve
+  const numP = 50;
+  const numD = 50;
+  const Gmin = 12.5;  // µS
+  const Gmax = 95.3;  // µS
+  const alpha = 2.0;
+
+  const rows: Record<string, number | string>[] = [];
+  const pulseVals: number[] = [];
+  const condVals: number[] = [];
+  const typeVals: string[] = [];
+
+  for (let i = 0; i < numP; i++) {
+    const n = i / (numP - 1);
+    const G = Gmin + (Gmax - Gmin) * (1 - Math.exp(-alpha * n)) / (1 - Math.exp(-alpha));
+    const noise = (Math.random() - 0.5) * 2.0;
+    const val = G + noise;
+    rows.push({ pulse_number: i + 1, conductance_uS: parseFloat(val.toFixed(4)), type: 'P' });
+    pulseVals.push(i + 1);
+    condVals.push(parseFloat(val.toFixed(4)));
+    typeVals.push('P');
+  }
+  for (let i = 0; i < numD; i++) {
+    const n = i / (numD - 1);
+    const G = Gmax + (Gmin - Gmax) * (1 - Math.exp(-1.8 * n)) / (1 - Math.exp(-1.8));
+    const noise = (Math.random() - 0.5) * 2.0;
+    const val = G + noise;
+    rows.push({ pulse_number: numP + i + 1, conductance_uS: parseFloat(val.toFixed(4)), type: 'D' });
+    pulseVals.push(numP + i + 1);
+    condVals.push(parseFloat(val.toFixed(4)));
+    typeVals.push('D');
+  }
+
+  const dataset: import('../types').Dataset = {
+    filename: 'demo_pd_data.csv',
+    headers: ['pulse_number', 'conductance_uS', 'type'],
+    rows,
+    columns: [
+      { name: 'pulse_number', values: pulseVals },
+      { name: 'conductance_uS', values: condVals },
+    ],
+  };
+  const mapping: ColumnMapping = {
+    pulse_number: 'pulse_number',
+    conductance_uS: 'conductance_uS',
+    type: 'type',
+  };
+  return { dataset, mapping };
+}
+
 export function UploadPage() {
   const critical = TEST_TYPES.filter((t) => t.critical);
   const optional = TEST_TYPES.filter((t) => !t.critical);
+  const { setUploadedTest, uploadedTests } = useAppStore();
+
+  const loadDemo = () => {
+    const { dataset, mapping } = generateDemoData();
+    setUploadedTest('pd_training', {
+      testId: 'pd_training',
+      dataset,
+      columnMapping: mapping,
+    });
+  };
+
+  const hasPdData = !!uploadedTests['pd_training'] || !!uploadedTests['ltp_ltd'];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold text-text mb-1">Upload Experimental Data</h2>
-        <p className="text-sm text-text-muted">
-          Upload your Keithley SMU data files. Green cards feed the ANN simulation.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-text mb-1">Upload Experimental Data</h2>
+          <p className="text-sm text-text-muted">
+            Upload your Keithley SMU data files. Green cards feed the ANN simulation.
+          </p>
+        </div>
+        {!hasPdData && (
+          <button
+            onClick={loadDemo}
+            className="px-4 py-2 bg-purple/15 text-purple border border-purple/20 rounded-lg text-sm font-medium hover:bg-purple/25 transition-all shrink-0"
+          >
+            Load Demo Data
+          </button>
+        )}
       </div>
 
       <div>

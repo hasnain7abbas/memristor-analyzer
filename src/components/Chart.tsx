@@ -103,8 +103,10 @@ export function AppLineChart({
   const showDots = (line: ChartLine): boolean | object => {
     if (plotType === 'scatter') return { r: gs.markerSize };
     if (plotType === 'line_scatter') return { r: gs.markerSize };
-    if (line.dot === true) return { r: gs.markerSize };
+    if (line.dot === true) return { r: Math.max(1, gs.markerSize - 1) };
     if (line.dot === false) return false;
+    // Default: no dots for line/step plots (avoids clutter with many data points)
+    if (plotType === 'line' || plotType === 'step') return false;
     return { r: gs.markerSize };
   };
 
@@ -196,6 +198,8 @@ export function AppLineChart({
                 dot={showDots(line)}
                 strokeWidth={getStrokeWidth()}
                 legendType={plotType === 'scatter' ? 'circle' : undefined}
+                connectNulls={false}
+                isAnimationActive={false}
                 strokeDasharray={
                   line.type === 'dashed' ? '6 3' : line.type === 'dotted' ? '2 3' : undefined
                 }
