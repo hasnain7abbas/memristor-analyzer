@@ -111,6 +111,40 @@ memristor-analyzer/
 - **CI** runs on every push and PR — validates TypeScript compilation and Rust checks
 - **Release** runs on push to main — auto-bumps patch version, builds Windows installers, creates GitHub Release with `.msi` and `.exe` attached
 
+## Changelog
+
+### v1.0.4 (latest)
+- **Smart CSV/TSV parser** — automatically skips Keithley instrument metadata rows to find real column headers
+- **Empty file detection** — clear error messages when data files have no rows or no numeric values, instead of silently showing nothing
+- **Frontend data validation** — catches empty/malformed datasets before storing, shows diagnostic info (headers found, row count)
+- **Demo data generator** — "Load Demo Data" button on Upload page lets you test the full pipeline without real measurement data
+- **Fixed script export** — added missing file system permissions; Python/CrossSim/NeuroSim/MemTorch script downloads now work correctly
+- **Chart rendering fixes** — disabled animation glitches during live ANN training, reduced dot clutter on line charts
+
+### v1.0.3
+- **LOESS/LOWESS smoothing** — locally weighted regression, best for non-linear P/D patterns
+- **Gaussian kernel smoothing** — weighted moving average with better shape preservation
+- **Monotonicity enforcement** — isotonic regression to enforce increasing/decreasing curves
+- **Strength blending** — adjustable 0-100% mix of raw and smoothed data
+- **Multi-framework export** — Python script generators for CrossSim, NeuroSim, MemTorch (in addition to PyTorch)
+- **Chart gallery** on Export page with all available charts and individual SVG/PNG download
+- **Enhanced formula reference** — physical derivations, literature references, worked examples
+
+### v1.0.2
+- **Publication-ready graphs** — presets for Frontiers, Nature, ACS, IEEE, presentation formats
+- **Fixed ANN accuracy** — copy-and-degrade approach for realistic memristor simulation
+- **Editable chart labels** — custom axis labels, captions, plot type selection per chart
+- **CI/CD pipeline** — automated builds and GitHub Releases on push to main
+
+### v1.0.1
+- **Full parameter extraction** — G_min/G_max, On/Off ratio, non-linearity α, CCV%, write noise, memory window, asymmetry index
+- **Savitzky-Golay smoothing** with reflected boundary padding
+- **ANN/MNIST simulation** — in-app training with perceptron, MLP (1H), MLP (2H) architectures
+- **PyTorch script export** with device parameters pre-filled
+
+### v1.0.0
+- Initial release — data upload, smoothing, parameter extraction, ANN training, chart export
+
 ## License
 
 MIT
