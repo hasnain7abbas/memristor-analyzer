@@ -4,7 +4,8 @@ import { useAppStore } from '../stores/useAppStore';
 import { SmoothingControls } from '../components/SmoothingControls';
 import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
-import { Info } from 'lucide-react';
+import { Info, Download } from 'lucide-react';
+import { exportChartData } from '../lib/chartExport';
 import type { ChartLocalSettings } from '../types';
 
 function computeR2(raw: number[], smoothed: number[]): number {
@@ -30,12 +31,42 @@ function computeShapePreservation(raw: number[], smoothed: number[]): number {
   return total > 0 ? matchCount / total : 1;
 }
 
+/** Segment flat data into individual P/D cycle blocks. */
+function segmentIntoCycles(values: number[], pulsesPerP: number, pulsesPerD: number): { pCycles: number[][]; dCycles: number[][] } {
+  const cycleLen = pulsesPerP + pulsesPerD;
+  const numCycles = Math.floor(values.length / cycleLen);
+  const pCycles: number[][] = [];
+  const dCycles: number[][] = [];
+  for (let c = 0; c < numCycles; c++) {
+    const start = c * cycleLen;
+    pCycles.push(values.slice(start, start + pulsesPerP));
+    dCycles.push(values.slice(start + pulsesPerP, start + cycleLen));
+  }
+  return { pCycles, dCycles };
+}
+
+/** Average multiple arrays of same length into one. */
+function averageArrays(arrays: number[][]): number[] {
+  if (arrays.length === 0) return [];
+  if (arrays.length === 1) return arrays[0];
+  const len = Math.min(...arrays.map(a => a.length));
+  const result: number[] = new Array(len).fill(0);
+  for (const arr of arrays) {
+    for (let i = 0; i < len; i++) result[i] += arr[i];
+  }
+  for (let i = 0; i < len; i++) result[i] /= arrays.length;
+  return result;
+}
+
+type ViewMode = 'raw' | 'per_cycle' | 'avg_cycle';
+
 export function SmoothingPage() {
-  const { uploadedTests, smoothingConfig, smoothedData, setSmoothedData } = useAppStore();
+  const { uploadedTests, smoothingConfig, smoothedData, setSmoothedData, cycleConfig, setCycleConfig } = useAppStore();
   const [selectedTest, setSelectedTest] = useState<string>('');
   const [selectedColumn, setSelectedColumn] = useState<string>('');
   const [showExplanation, setShowExplanation] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('avg_cycle');
 
   const [mainChart, setMainChart] = useState<ChartLocalSettings>({
     xLabel: 'Pulse Number', yLabel: '', plotType: 'line', caption: '',
@@ -46,6 +77,9 @@ export function SmoothingPage() {
 
   const testIds = Object.keys(uploadedTests);
   const currentTest = selectedTest ? uploadedTests[selectedTest] : null;
+
+  // Determine if this is a P/D test that needs cycle segmentation
+  const isPDTest = selectedTest === 'pd_training' || selectedTest === 'ltp_ltd';
 
   useEffect(() => {
     if (testIds.length > 0 && !selectedTest) {
@@ -65,16 +99,39 @@ export function SmoothingPage() {
     }
   }, [currentTest, selectedColumn]);
 
-  useEffect(() => {
-    if (!currentTest || !selectedColumn) return;
+  // Get raw values for the selected column
+  const rawValues = useMemo(() => {
+    if (!currentTest || !selectedColumn) return [];
     const col = currentTest.dataset.columns.find((c) => c.name === selectedColumn);
-    if (!col || col.values.length === 0) return;
+    return col?.values ?? [];
+  }, [currentTest, selectedColumn]);
+
+  // Segment into cycles if this is P/D data
+  const cycleData = useMemo(() => {
+    if (!isPDTest || rawValues.length === 0) return null;
+    return segmentIntoCycles(rawValues, cycleConfig.pulsesPerP, cycleConfig.pulsesPerD);
+  }, [isPDTest, rawValues, cycleConfig.pulsesPerP, cycleConfig.pulsesPerD]);
+
+  // Compute the data to smooth based on view mode
+  const dataToSmooth = useMemo(() => {
+    if (!isPDTest || !cycleData || viewMode === 'raw') return rawValues;
+    if (viewMode === 'avg_cycle') {
+      // Average P cycles and D cycles separately, then concatenate
+      const pAvg = averageArrays(cycleData.pCycles);
+      const dAvg = averageArrays(cycleData.dCycles);
+      return [...pAvg, ...dAvg];
+    }
+    return rawValues;
+  }, [isPDTest, cycleData, viewMode, rawValues]);
+
+  useEffect(() => {
+    if (dataToSmooth.length === 0) return;
 
     const doSmooth = async () => {
       setLoading(true);
       try {
         const result = await invoke<number[]>('smooth_data', {
-          data: col.values,
+          data: dataToSmooth,
           method: smoothingConfig.method,
           windowSize: smoothingConfig.windowSize,
           polyOrder: smoothingConfig.method === 'savitzky_golay' ? smoothingConfig.polyOrder : null,
@@ -85,7 +142,7 @@ export function SmoothingPage() {
           monotonicDirection: smoothingConfig.monotonicDirection,
           bandwidth: smoothingConfig.bandwidth,
         });
-        setSmoothedData(`${selectedTest}_${selectedColumn}`, result);
+        setSmoothedData(`${selectedTest}_${selectedColumn}_${viewMode}`, result);
       } catch (e) {
         console.error('Smoothing error:', e);
       } finally {
@@ -93,7 +150,7 @@ export function SmoothingPage() {
       }
     };
     doSmooth();
-  }, [currentTest, selectedColumn, smoothingConfig, selectedTest, setSmoothedData]);
+  }, [dataToSmooth, smoothingConfig, selectedTest, selectedColumn, viewMode, setSmoothedData]);
 
   if (testIds.length === 0) {
     return (
@@ -107,18 +164,57 @@ export function SmoothingPage() {
     );
   }
 
-  const rawData = currentTest?.dataset.columns.find((c) => c.name === selectedColumn)?.values || [];
-  const smooth = smoothedData[`${selectedTest}_${selectedColumn}`] || [];
+  const smooth = smoothedData[`${selectedTest}_${selectedColumn}_${viewMode}`] || [];
 
-  const chartData = rawData.map((val, i) => ({
-    index: i + 1,
-    raw: val,
-    smoothed: smooth[i] ?? val,
-    diff: smooth[i] != null ? val - smooth[i] : 0,
-  }));
+  // Build chart data based on view mode
+  let chartData: any[] = [];
+  let chartLines: any[] = [];
 
-  const r2 = useMemo(() => computeR2(rawData, smooth), [rawData, smooth]);
-  const shapeScore = useMemo(() => computeShapePreservation(rawData, smooth), [rawData, smooth]);
+  if (viewMode === 'per_cycle' && cycleData) {
+    // Show all cycles overlaid, each P cycle as a separate line
+    const maxCyclesToShow = Math.min(cycleData.pCycles.length, 10);
+    const pLen = cycleData.pCycles[0]?.length ?? 0;
+    const dLen = cycleData.dCycles[0]?.length ?? 0;
+    const totalLen = pLen + dLen;
+
+    const colors = ['#4f8ff7', '#f87171', '#34d399', '#fbbf24', '#a78bfa', '#22d3ee', '#f472b6', '#fb923c', '#2dd4bf', '#818cf8'];
+
+    for (let i = 0; i < totalLen; i++) {
+      const point: any = { index: i + 1 };
+      for (let c = 0; c < maxCyclesToShow; c++) {
+        if (i < pLen) {
+          point[`cycle_${c}`] = cycleData.pCycles[c]?.[i];
+        } else {
+          point[`cycle_${c}`] = cycleData.dCycles[c]?.[i - pLen];
+        }
+      }
+      chartData.push(point);
+    }
+
+    for (let c = 0; c < maxCyclesToShow; c++) {
+      chartLines.push({
+        dataKey: `cycle_${c}`,
+        color: colors[c % colors.length],
+        name: `Cycle ${c + 1}`,
+        dot: false,
+      });
+    }
+  } else {
+    // Raw or avg_cycle mode: show raw vs smoothed
+    chartData = dataToSmooth.map((val, i) => ({
+      index: i + 1,
+      raw: val,
+      smoothed: smooth[i] ?? val,
+      diff: smooth[i] != null ? val - smooth[i] : 0,
+    }));
+    chartLines = [
+      { dataKey: 'raw', color: '#8494b2', name: 'Raw', dot: true, type: 'dotted' as const },
+      { dataKey: 'smoothed', color: '#4f8ff7', name: 'Smoothed' },
+    ];
+  }
+
+  const r2 = useMemo(() => computeR2(dataToSmooth, smooth), [dataToSmooth, smooth]);
+  const shapeScore = useMemo(() => computeShapePreservation(dataToSmooth, smooth), [dataToSmooth, smooth]);
 
   return (
     <div className="space-y-6">
@@ -130,7 +226,7 @@ export function SmoothingPage() {
       </div>
 
       {/* Dataset + column selection */}
-      <div className="flex gap-4">
+      <div className="flex gap-4 flex-wrap">
         <div>
           <label className="block text-xs text-text-muted mb-1">Dataset</label>
           <select
@@ -169,6 +265,61 @@ export function SmoothingPage() {
         </div>
       </div>
 
+      {/* Cycle structure controls — shown for P/D tests */}
+      {isPDTest && (
+        <div className="bg-surface rounded-xl border border-border p-4 space-y-3">
+          <h3 className="text-sm font-medium text-text">Cycle Structure</h3>
+          <p className="text-xs text-text-muted">
+            Your data contains repeating P/D cycles (e.g., 50 positive pulses then 50 negative pulses, repeated N times).
+            Specify the cycle structure so smoothing and visualization work correctly.
+          </p>
+          <div className="flex items-end gap-4 flex-wrap">
+            <div>
+              <label className="block text-xs text-text-muted mb-1">Pulses per Potentiation</label>
+              <input
+                type="number"
+                min={1}
+                value={cycleConfig.pulsesPerP}
+                onChange={(e) => setCycleConfig({ pulsesPerP: Math.max(1, parseInt(e.target.value) || 50) })}
+                className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-28 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-text-muted mb-1">Pulses per Depression</label>
+              <input
+                type="number"
+                min={1}
+                value={cycleConfig.pulsesPerD}
+                onChange={(e) => setCycleConfig({ pulsesPerD: Math.max(1, parseInt(e.target.value) || 50) })}
+                className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-28 font-mono"
+              />
+            </div>
+            {rawValues.length > 0 && (
+              <span className="text-xs text-text-dim">
+                {Math.floor(rawValues.length / (cycleConfig.pulsesPerP + cycleConfig.pulsesPerD))} cycle(s) from {rawValues.length} data points
+              </span>
+            )}
+          </div>
+
+          {/* View mode toggle */}
+          <div className="flex gap-2 pt-1">
+            {(['raw', 'per_cycle', 'avg_cycle'] as ViewMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                className={`px-3 py-1.5 text-xs rounded-lg border ${
+                  viewMode === mode
+                    ? 'bg-accent/20 border-accent text-accent'
+                    : 'bg-surface-alt border-border text-text-muted hover:text-text'
+                }`}
+              >
+                {mode === 'raw' ? 'Raw Sequence' : mode === 'per_cycle' ? 'Per-Cycle Overlay' : 'Average Cycle'}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <SmoothingControls />
 
       {loading && (
@@ -179,7 +330,7 @@ export function SmoothingPage() {
       )}
 
       {/* Quality metrics */}
-      {smooth.length > 0 && smoothingConfig.method !== 'none' && (
+      {smooth.length > 0 && smoothingConfig.method !== 'none' && viewMode !== 'per_cycle' && (
         <div className="flex gap-4">
           <div className="px-3 py-2 bg-surface rounded-lg border border-border">
             <span className="text-xs text-text-muted">R² (fit quality): </span>
@@ -201,20 +352,39 @@ export function SmoothingPage() {
           <ChartControls settings={mainChart} onChange={(s) => setMainChart((p) => ({ ...p, ...s }))} />
           <AppLineChart
             data={chartData}
-            lines={[
-              { dataKey: 'raw', color: '#8494b2', name: 'Raw', dot: true, type: 'dotted' },
-              { dataKey: 'smoothed', color: '#4f8ff7', name: 'Smoothed' },
-            ]}
+            lines={chartLines}
             xKey="index"
             xLabel={mainChart.xLabel}
             yLabel={mainChart.yLabel}
-            title="Raw vs Smoothed"
+            title={viewMode === 'per_cycle' ? 'Per-Cycle Overlay' : viewMode === 'avg_cycle' ? 'Average Cycle (Raw vs Smoothed)' : 'Raw vs Smoothed'}
             caption={mainChart.caption}
             plotType={mainChart.plotType}
             id="smoothing-comparison"
           />
 
-          {smoothingConfig.method !== 'none' && (
+          {/* Data Export */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                const cols = Object.keys(chartData[0] || {});
+                exportChartData(chartData, cols, `smoothing_${viewMode}`, 'txt');
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+            >
+              <Download size={12} /> Export .txt (Tab-delimited)
+            </button>
+            <button
+              onClick={() => {
+                const cols = Object.keys(chartData[0] || {});
+                exportChartData(chartData, cols, `smoothing_${viewMode}`, 'csv');
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+            >
+              <Download size={12} /> Export .csv
+            </button>
+          </div>
+
+          {smoothingConfig.method !== 'none' && viewMode !== 'per_cycle' && (
             <>
               <ChartControls settings={residualChart} onChange={(s) => setResidualChart((p) => ({ ...p, ...s }))} />
               <AppLineChart

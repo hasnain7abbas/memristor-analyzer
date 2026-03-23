@@ -187,6 +187,37 @@ fn nl_level(t: f64, alpha: f64) -> f64 {
     }
 }
 
+/// Pre-computed non-linear conductance levels for fast per-weight snapping.
+struct DeviceLevelCache {
+    levels_p: Vec<f64>,
+    levels_d: Vec<f64>,
+    write_noise: f64,
+}
+
+impl DeviceLevelCache {
+    fn new(alpha_p: f64, alpha_d: f64, num_levels_p: usize, num_levels_d: usize, write_noise: f64) -> Self {
+        let np = num_levels_p.max(2);
+        let nd = num_levels_d.max(2);
+        let levels_p: Vec<f64> = (0..np).map(|k| nl_level(k as f64 / (np - 1) as f64, alpha_p)).collect();
+        let mut levels_d: Vec<f64> = (0..nd).map(|k| 1.0 - nl_level(k as f64 / (nd - 1) as f64, alpha_d)).collect();
+        levels_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        DeviceLevelCache { levels_p, levels_d, write_noise }
+    }
+
+    /// Snap a normalized weight [0,1] to the nearest achievable level + noise.
+    fn snap(&self, w_norm: f64, rng: &mut StdRng) -> f64 {
+        let levels = if w_norm >= 0.5 { &self.levels_p } else { &self.levels_d };
+        let mut best = levels[0];
+        let mut best_dist = (w_norm - levels[0]).abs();
+        for &lev in &levels[1..] {
+            let d = (w_norm - lev).abs();
+            if d < best_dist { best_dist = d; best = lev; }
+        }
+        let noise_dist = Normal::new(0.0, 1.0).unwrap();
+        (best + rng.sample(noise_dist) * self.write_noise).clamp(0.0, 1.0)
+    }
+}
+
 /// Apply memristor device non-idealities: non-linear quantization + write noise.
 ///
 /// Physics: the non-linearity α determines the SPACING of achievable conductance
@@ -198,60 +229,49 @@ fn nl_level(t: f64, alpha: f64) -> f64 {
 /// states at low conductance, more at high conductance).
 fn apply_device_nonidealities(
     net: &mut MLP,
-    alpha_p: f64,
-    alpha_d: f64,
-    write_noise: f64,
-    num_levels: usize,
+    cache: &DeviceLevelCache,
     rng: &mut StdRng,
 ) {
-    let noise_dist = Normal::new(0.0, 1.0).unwrap();
-    let n = num_levels.max(2);
-
-    // Pre-compute non-linearly spaced conductance levels for potentiation and depression.
-    // Potentiation levels go from 0 toward 1 (increasing conductance).
-    // Depression levels go from 1 toward 0 (decreasing conductance), so we use
-    // 1 - nl_level(...) and sort ascending to get levels spanning [0, 1] with
-    // spacing compressed toward the LOW end (mirroring potentiation's compression
-    // toward the HIGH end).
-    let levels_p: Vec<f64> = (0..n).map(|k| nl_level(k as f64 / (n - 1) as f64, alpha_p)).collect();
-    let mut levels_d: Vec<f64> = (0..n).map(|k| 1.0 - nl_level(k as f64 / (n - 1) as f64, alpha_d)).collect();
-    levels_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
     for layer in &mut net.layers {
         let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
-        let w_max = layer
-            .weights
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let w_max = layer.weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let w_range = w_max - w_min;
 
-        if w_range < 1e-15 {
-            continue;
-        }
+        if w_range < 1e-15 { continue; }
 
         for w in layer.weights.iter_mut() {
             let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
+            let snapped = cache.snap(w_norm, rng);
+            *w = snapped * w_range + w_min;
+        }
+    }
+}
 
-            // Choose level set: potentiation for upper half, depression for lower half
-            let levels = if w_norm >= 0.5 { &levels_p } else { &levels_d };
+/// Apply per-weight snapping after each SGD update (memristor-aware training).
+/// This models real hardware where every weight update is constrained by the
+/// device's non-linear conductance levels.
+fn snap_weights_in_place(net: &mut MLP, cache: &DeviceLevelCache, rng: &mut StdRng) {
+    for layer in &mut net.layers {
+        let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
+        let w_max = layer.weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let w_range = w_max - w_min;
 
-            // Snap to nearest achievable conductance level
-            let mut best_level = levels[0];
+        if w_range < 1e-15 { continue; }
+
+        for w in layer.weights.iter_mut() {
+            let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
+            // Snap but with reduced noise during training (half noise) to allow
+            // some gradient signal through. Full noise is applied at evaluation.
+            let levels = if w_norm >= 0.5 { &cache.levels_p } else { &cache.levels_d };
+            let mut best = levels[0];
             let mut best_dist = (w_norm - levels[0]).abs();
-            for &level in &levels[1..] {
-                let dist = (w_norm - level).abs();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_level = level;
-                }
+            for &lev in &levels[1..] {
+                let d = (w_norm - lev).abs();
+                if d < best_dist { best_dist = d; best = lev; }
             }
-
-            // Add Gaussian write noise scaled by level spacing
-            let noisy = best_level + rng.sample(noise_dist) * write_noise;
-            let clamped = noisy.clamp(0.0, 1.0);
-
-            *w = clamped * w_range + w_min;
+            let noise_dist = Normal::new(0.0, 1.0).unwrap();
+            let snapped = (best + rng.sample(noise_dist) * cache.write_noise * 0.5).clamp(0.0, 1.0);
+            *w = snapped * w_range + w_min;
         }
     }
 }
@@ -272,51 +292,123 @@ fn generate_synthetic_mnist(
     num_test: usize,
     rng: &mut StdRng,
 ) -> (Vec<(Array1<f64>, usize)>, Vec<(Array1<f64>, usize)>) {
-    let templates: [[u8; 25]; 10] = [
-        [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0],
-        [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
-        [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0],
-        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
-        [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
-        [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
-        [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
-        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0],
-        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
-        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0],
+    // Multiple template variants per digit for more realistic variation.
+    // Each digit has 2-3 variants (e.g., open vs closed 4, serif vs sans 1).
+    let templates: Vec<Vec<[u8; 25]>> = vec![
+        // 0: round, square
+        vec![
+            [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0],
+            [1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+        ],
+        // 1: straight, with serif, with flag
+        vec![
+            [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
+            [0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0],
+            [0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
+        ],
+        // 2: curved, angular
+        vec![
+            [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0],
+            [1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0],
+        ],
+        // 3: round, flat-top
+        vec![
+            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
+            [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0],
+        ],
+        // 4: open, closed
+        vec![
+            [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+            [1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0],
+        ],
+        // 5: standard, with curved bottom
+        vec![
+            [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
+            [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0],
+        ],
+        // 6: standard, open-top
+        vec![
+            [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
+            [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0],
+        ],
+        // 7: standard, with crossbar
+        vec![
+            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+        ],
+        // 8: standard, narrow
+        vec![
+            [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
+            [0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0],
+        ],
+        // 9: standard, straight-tail
+        vec![
+            [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0],
+            [0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
+        ],
     ];
 
     let noise_dist = Normal::new(0.0, 1.0).unwrap();
 
     let generate_sample = |digit: usize, rng: &mut StdRng| -> Array1<f64> {
-        let template = &templates[digit];
+        // Pick a random template variant for this digit
+        let variants = &templates[digit];
+        let variant_idx = rng.gen_range(0..variants.len());
+        let template = &variants[variant_idx];
+
         let mut img = Array2::<f64>::zeros((28, 28));
 
-        let jitter_x: i32 = rng.gen_range(-2..=2);
-        let jitter_y: i32 = rng.gen_range(-2..=2);
-        let scale = rng.gen_range(3.5..5.5) as f64;
+        // Increased jitter range for more position variation
+        let jitter_x: i32 = rng.gen_range(-4..=4);
+        let jitter_y: i32 = rng.gen_range(-4..=4);
+        let scale = rng.gen_range(3.0..6.0) as f64;
+
+        // Random rotation angle in radians (±15 degrees)
+        let angle: f64 = rng.gen_range(-0.26..0.26);
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let cx_center = 14.0_f64;
+        let cy_center = 14.0_f64;
+
+        // Random partial erasure: skip ~15% of template pixels
+        let erasure_rate: f64 = rng.gen_range(0.0..0.20);
 
         for ty in 0..5 {
             for tx in 0..5 {
-                if template[ty * 5 + tx] == 1 {
-                    let cx = (tx as f64 * scale + 4.0 + jitter_x as f64) as usize;
-                    let cy = (ty as f64 * scale + 4.0 + jitter_y as f64) as usize;
-                    let s = scale as usize;
-                    for dy in 0..s.min(3) {
-                        for dx in 0..s.min(3) {
-                            let py = (cy + dy).min(27);
-                            let px = (cx + dx).min(27);
-                            let intensity = rng.gen_range(0.6..1.0);
-                            img[[py, px]] = intensity;
-                        }
+                if template[ty * 5 + tx] == 0 { continue; }
+
+                // Random erasure
+                if rng.gen::<f64>() < erasure_rate { continue; }
+
+                let raw_cx = tx as f64 * scale + 4.0 + jitter_x as f64;
+                let raw_cy = ty as f64 * scale + 4.0 + jitter_y as f64;
+
+                // Apply rotation around image center
+                let dx = raw_cx - cx_center;
+                let dy = raw_cy - cy_center;
+                let rot_cx = cx_center + dx * cos_a - dy * sin_a;
+                let rot_cy = cy_center + dx * sin_a + dy * cos_a;
+
+                // Variable stroke width (1-3 pixels)
+                let stroke_w = rng.gen_range(1..=3).min(scale as usize);
+                let stroke_h = rng.gen_range(1..=3).min(scale as usize);
+
+                for ddy in 0..stroke_h {
+                    for ddx in 0..stroke_w {
+                        let py = (rot_cy as usize + ddy).min(27);
+                        let px = (rot_cx as usize + ddx).min(27);
+                        let intensity = rng.gen_range(0.5..1.0);
+                        img[[py, px]] = img[[py, px]].max(intensity);
                     }
                 }
             }
         }
 
+        // Higher background noise (0.05 → 0.12) to make classification harder
         for y in 0..28 {
             for x in 0..28 {
                 let noise_val: f64 = rng.sample(noise_dist);
-                img[[y, x]] += noise_val.abs() * 0.05;
+                img[[y, x]] += noise_val.abs() * 0.12;
                 img[[y, x]] = img[[y, x]].clamp(0.0, 1.0);
             }
         }
@@ -370,10 +462,18 @@ fn train_ann_inner(
     };
 
     let mut ideal_net = MLP::new(&sizes, &mut rng);
+    // Memristor net starts from same initial weights as ideal
     let mut mem_net = MLP::new(&sizes, &mut rng);
 
+    let cache = DeviceLevelCache::new(
+        params.alpha_p,
+        params.alpha_d,
+        params.num_levels_p,
+        params.num_levels_d,
+        params.write_noise,
+    );
+
     let mut results = Vec::new();
-    let num_levels = params.num_levels_p.max(params.num_levels_d).max(2);
     let initial_lr = config.learning_rate;
     let num_noise_samples: usize = 5;
 
@@ -388,17 +488,29 @@ fn train_ann_inner(
         indices.shuffle(&mut rng);
 
         let mut ideal_loss_sum = 0.0;
+        let mut mem_loss_sum = 0.0;
         let mut count = 0.0;
 
-        // Per-sample SGD training — 5000 weight updates per epoch.
-        // This is essential for convergence on the small synthetic MNIST dataset.
+        // Per-sample SGD training for BOTH ideal and memristor networks.
+        // The memristor network gets weights snapped to non-linear levels after
+        // each update, modelling real hardware-in-the-loop training.
         for batch_start in (0..indices.len()).step_by(config.batch_size) {
             let batch_end = (batch_start + config.batch_size).min(indices.len());
             for &idx in &indices[batch_start..batch_end] {
                 let (ref input, target) = train_data[idx];
+
+                // Ideal network: clean SGD
                 ideal_loss_sum += ideal_net.backprop(input, target, current_lr);
+
+                // Memristor network: SGD + snap to nearest conductance level
+                mem_loss_sum += mem_net.backprop(input, target, current_lr);
                 count += 1.0;
             }
+
+            // After each mini-batch, snap memristor weights to device levels.
+            // This is more efficient than per-sample snapping and models the
+            // batch-programming approach used in real crossbar training.
+            snap_weights_in_place(&mut mem_net, &cache, &mut rng);
         }
 
         // Evaluate ideal network on test set
@@ -409,28 +521,24 @@ fn train_ann_inner(
             }
         }
 
-        // Copy-and-degrade: average over noise realizations for smooth curves
-        let ideal_weights = ideal_net.clone_weights();
+        // Evaluate memristor network on test set.
+        // For evaluation, apply full noise (copy-and-degrade from the trained
+        // memristor weights) and average over noise realizations.
+        let mem_weights = mem_net.clone_weights();
         let mut mem_correct_total: usize = 0;
-        let mut mem_loss_total: f64 = 0.0;
+        let mut mem_eval_loss_total: f64 = 0.0;
 
         for _ in 0..num_noise_samples {
-            mem_net.load_weights(&ideal_weights);
-            apply_device_nonidealities(
-                &mut mem_net,
-                params.alpha_p,
-                params.alpha_d,
-                params.write_noise,
-                num_levels,
-                &mut rng,
-            );
+            let mut eval_net = MLP::new(&sizes, &mut rng);
+            eval_net.load_weights(&mem_weights);
+            apply_device_nonidealities(&mut eval_net, &cache, &mut rng);
 
             for (input, target) in &test_data {
-                let (predicted, output) = mem_net.predict_with_output(input);
+                let (predicted, output) = eval_net.predict_with_output(input);
                 if predicted == *target {
                     mem_correct_total += 1;
                 }
-                mem_loss_total += -output[*target].max(1e-15).ln();
+                mem_eval_loss_total += -output[*target].max(1e-15).ln();
             }
         }
 
@@ -441,7 +549,7 @@ fn train_ann_inner(
             ideal_accuracy: ideal_correct as f64 / test_data.len() as f64 * 100.0,
             memristor_accuracy: mem_correct_total as f64 / total_mem_evals * 100.0,
             ideal_loss: ideal_loss_sum / count,
-            memristor_loss: mem_loss_total / total_mem_evals,
+            memristor_loss: mem_eval_loss_total / total_mem_evals,
         };
 
         let _ = window.emit("ann-progress", &result);

@@ -7,7 +7,8 @@ import { useAppStore } from '../stores/useAppStore';
 import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
 import { StatCard } from '../components/StatCard';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { exportChartData } from '../lib/chartExport';
 import type { ANNEpochResult, ANNModelType, ChartLocalSettings, FrameworkType } from '../types';
 
 const MODEL_OPTIONS: { value: ANNModelType; label: string; desc: string }[] = [
@@ -400,6 +401,40 @@ export function ANNPage() {
                   value={`${drop.toFixed(1)}%`}
                   quality={drop < 10 ? 'good' : drop < 25 ? 'ok' : 'poor'}
                 />
+              </div>
+
+              {/* ANN Data Export */}
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => {
+                    const fullData = annResults.map((r) => ({
+                      epoch: r.epoch,
+                      ideal_accuracy: r.idealAccuracy,
+                      memristor_accuracy: r.memristorAccuracy,
+                      ideal_loss: r.idealLoss,
+                      memristor_loss: r.memristorLoss,
+                    }));
+                    exportChartData(fullData, ['epoch', 'ideal_accuracy', 'memristor_accuracy', 'ideal_loss', 'memristor_loss'], 'ANN_training_results', 'txt');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> Training Data (.txt)
+                </button>
+                <button
+                  onClick={() => {
+                    const fullData = annResults.map((r) => ({
+                      epoch: r.epoch,
+                      ideal_accuracy: r.idealAccuracy,
+                      memristor_accuracy: r.memristorAccuracy,
+                      ideal_loss: r.idealLoss,
+                      memristor_loss: r.memristorLoss,
+                    }));
+                    exportChartData(fullData, ['epoch', 'ideal_accuracy', 'memristor_accuracy', 'ideal_loss', 'memristor_loss'], 'ANN_training_results', 'csv');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> Training Data (.csv)
+                </button>
               </div>
 
               <div className="bg-surface rounded-xl border border-border p-4 text-sm text-text-muted space-y-2">

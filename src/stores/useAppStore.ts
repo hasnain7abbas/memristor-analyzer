@@ -130,12 +130,12 @@ export const useAppStore = create<AppState>((set) => ({
   cycleConfig: {
     pulsesPerP: 50,
     pulsesPerD: 50,
-    autoDetect: true,
+    autoDetect: false,
   },
   setCycleConfig: (config) =>
     set((s) => ({ cycleConfig: { ...s.cycleConfig, ...config } })),
 
-  vRead: 0.1,
+  vRead: 2.5,
   setVRead: (v) => set({ vRead: v }),
 
   isCurrentInput: false,

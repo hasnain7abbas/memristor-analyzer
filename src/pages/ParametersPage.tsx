@@ -5,6 +5,8 @@ import { FormulaCard } from '../components/FormulaCard';
 import { StatCard } from '../components/StatCard';
 import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
+import { Download } from 'lucide-react';
+import { exportChartData, exportMultiSection } from '../lib/chartExport';
 import type { ChartLocalSettings, FormulaDefinition } from '../types';
 
 const FORMULAS: FormulaDefinition[] = [
@@ -162,77 +164,121 @@ const FORMULAS: FormulaDefinition[] = [
  * Handles both single-sweep (one P then one D) and multi-cycle data
  * (e.g., 50 pulses up, 50 pulses down, repeated N times).
  *
- * For multi-cycle data: detects the cycle period from peak spacing,
- * then extracts a representative P and D curve by averaging across
- * all cycles (aligned by pulse position within each half-cycle).
+ * Uses derivative sign-change detection instead of peak finding, which is
+ * robust to any cycle period (the old peak-window approach failed when
+ * the window was larger than the cycle period).
  */
-function autoDetectPDCycles(values: number[]): { potentiation: number[]; depression: number[] } {
+function autoDetectPDCycles(values: number[]): { potentiation: number[]; depression: number[]; detectedPulsesPerP: number; detectedPulsesPerD: number } {
   const n = values.length;
-  if (n < 4) return { potentiation: values, depression: [] };
+  if (n < 10) return { potentiation: values, depression: [], detectedPulsesPerP: n, detectedPulsesPerD: 0 };
 
-  // Smooth for peak detection (moving average)
-  const winSize = Math.max(3, Math.min(11, Math.floor(n / 20)));
+  // Step 1: Light smoothing for derivative computation (window=5)
+  const smoothWin = 5;
   const smoothed: number[] = [];
   for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - Math.floor(winSize / 2));
-    const hi = Math.min(n, i + Math.floor(winSize / 2) + 1);
+    const lo = Math.max(0, i - 2);
+    const hi = Math.min(n, i + 3);
     let sum = 0;
     for (let j = lo; j < hi; j++) sum += values[j];
     smoothed.push(sum / (hi - lo));
   }
 
-  // Find major peaks (local max within a window)
-  const peakWindow = Math.max(5, Math.floor(n / 40));
-  const peaks: number[] = [];
-  for (let i = peakWindow; i < n - peakWindow; i++) {
-    let isMax = true;
-    for (let j = i - peakWindow; j <= i + peakWindow; j++) {
-      if (j !== i && smoothed[j] > smoothed[i]) { isMax = false; break; }
-    }
-    if (isMax && (peaks.length === 0 || i - peaks[peaks.length - 1] > peakWindow * 2)) {
-      peaks.push(i);
-    }
+  // Step 2: Compute derivative signs
+  const signs: number[] = [];
+  for (let i = 1; i < n; i++) {
+    signs.push(Math.sign(smoothed[i] - smoothed[i - 1]));
   }
 
-  // Multi-cycle: need at least 2 peaks with consistent spacing
-  if (peaks.length >= 2) {
-    // Calculate cycle period from peak-to-peak distances
-    const spacings: number[] = [];
-    for (let i = 1; i < peaks.length; i++) spacings.push(peaks[i] - peaks[i - 1]);
-    spacings.sort((a, b) => a - b);
-    const period = spacings[Math.floor(spacings.length / 2)]; // median
-    const halfPeriod = Math.floor(period / 2);
-
-    // Extract P and D segments centered on each peak:
-    //   P = [peak - halfPeriod, peak]  (rising to peak)
-    //   D = [peak, peak + halfPeriod]  (falling from peak)
-    // Then average across all cycles for a representative curve.
-    const allP: number[][] = [];
-    const allD: number[][] = [];
-
-    for (const pk of peaks) {
-      const pStart = Math.max(0, pk - halfPeriod);
-      const dEnd = Math.min(n - 1, pk + halfPeriod);
-      if (pk - pStart >= 5) allP.push(values.slice(pStart, pk + 1));
-      if (dEnd - pk >= 5) allD.push(values.slice(pk, dEnd + 1));
+  // Step 3: Find sign changes (positive→negative = peak, negative→positive = valley)
+  // Filter out zero-derivative regions by looking at the last non-zero sign.
+  const transitions: { index: number; type: 'peak' | 'valley' }[] = [];
+  let lastSign = 0;
+  for (let i = 0; i < signs.length; i++) {
+    if (signs[i] === 0) continue;
+    if (lastSign > 0 && signs[i] < 0) {
+      transitions.push({ index: i, type: 'peak' });
+    } else if (lastSign < 0 && signs[i] > 0) {
+      transitions.push({ index: i, type: 'valley' });
     }
+    lastSign = signs[i];
+  }
 
-    if (allP.length >= 1 && allD.length >= 1) {
-      // Average all P segments (interpolated to the median length)
-      const pAvg = averageAlignedSegments(allP);
-      const dAvg = averageAlignedSegments(allD);
-
-      if (pAvg.length >= 4 && dAvg.length >= 4) {
-        return { potentiation: pAvg, depression: dAvg };
+  // Step 4: Filter out spurious transitions that are too close together
+  // (noise-induced micro-reversals). Minimum distance = 10 points.
+  const filtered: typeof transitions = [];
+  for (const t of transitions) {
+    if (filtered.length === 0 || t.index - filtered[filtered.length - 1].index >= 10) {
+      // Also require alternating peak/valley
+      if (filtered.length === 0 || filtered[filtered.length - 1].type !== t.type) {
+        filtered.push(t);
       }
     }
   }
 
-  // Fallback: single-sweep — split at MIDPOINT (not max conductance point).
-  // Splitting at max-conductance breaks when potentiation saturates early,
-  // which is the common case for non-linear devices.
+  // Step 5: If we have multiple cycles, estimate period and segment
+  if (filtered.length >= 3) {
+    // Estimate half-period from median spacing between consecutive transitions
+    const spacings: number[] = [];
+    for (let i = 1; i < filtered.length; i++) {
+      spacings.push(filtered[i].index - filtered[i - 1].index);
+    }
+    spacings.sort((a, b) => a - b);
+    const halfPeriod = spacings[Math.floor(spacings.length / 2)];
+    const period = halfPeriod * 2;
+
+    // Determine which half is P and which is D by checking the first transition
+    const firstRising = filtered[0].type === 'peak'; // first segment was rising = potentiation
+
+    // Segment into P and D blocks using the detected period
+    const pulsesPerHalf = halfPeriod;
+    const cycleLen = period;
+    const numCycles = Math.floor(n / cycleLen);
+
+    if (numCycles >= 1) {
+      const pCycles: number[][] = [];
+      const dCycles: number[][] = [];
+
+      // Find the start: look for the first valley (start of potentiation)
+      // or use index 0 if data starts with potentiation
+      let dataStart = 0;
+      if (filtered.length > 0 && filtered[0].type === 'valley' && filtered[0].index < halfPeriod) {
+        dataStart = filtered[0].index;
+      }
+
+      for (let c = 0; c < numCycles; c++) {
+        const start = dataStart + c * cycleLen;
+        const mid = start + pulsesPerHalf;
+        const end = start + cycleLen;
+        if (end <= n) {
+          if (firstRising) {
+            pCycles.push(values.slice(start, mid));
+            dCycles.push(values.slice(mid, end));
+          } else {
+            dCycles.push(values.slice(start, mid));
+            pCycles.push(values.slice(mid, end));
+          }
+        }
+      }
+
+      if (pCycles.length >= 1 && dCycles.length >= 1) {
+        return {
+          potentiation: averageAlignedSegments(pCycles),
+          depression: averageAlignedSegments(dCycles),
+          detectedPulsesPerP: pCycles[0]?.length ?? halfPeriod,
+          detectedPulsesPerD: dCycles[0]?.length ?? halfPeriod,
+        };
+      }
+    }
+  }
+
+  // Fallback: single-sweep — split at midpoint
   const mid = Math.floor(n / 2);
-  return { potentiation: values.slice(0, mid), depression: values.slice(mid) };
+  return {
+    potentiation: values.slice(0, mid),
+    depression: values.slice(mid),
+    detectedPulsesPerP: mid,
+    detectedPulsesPerD: n - mid,
+  };
 }
 
 /** Average multiple segments of possibly different lengths into one representative curve. */
@@ -697,6 +743,84 @@ export function ParametersPage() {
                 plotType={pdChart.plotType}
                 id="pd-curves"
               />
+              {/* P/D Data Export */}
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => {
+                    if (!extractedParams) return;
+                    const pData = extractedParams.potentiationRaw.map((v: number, i: number) => ({
+                      pulse: i + 1,
+                      raw: v,
+                      smoothed: extractedParams.potentiationSmoothed[i],
+                      fitted: extractedParams.potentiationFitted[i],
+                    }));
+                    const dData = extractedParams.depressionRaw.map((v: number, i: number) => ({
+                      pulse: i + 1,
+                      raw: v,
+                      smoothed: extractedParams.depressionSmoothed[i],
+                      fitted: extractedParams.depressionFitted[i],
+                    }));
+                    exportMultiSection([
+                      { label: 'Potentiation', columns: ['pulse', 'raw', 'smoothed', 'fitted'], data: pData },
+                      { label: 'Depression', columns: ['pulse', 'raw', 'smoothed', 'fitted'], data: dData },
+                    ], 'PD_curves', 'txt');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> P/D Curves (.txt)
+                </button>
+                <button
+                  onClick={() => {
+                    if (!extractedParams) return;
+                    const pData = extractedParams.potentiationRaw.map((v: number, i: number) => ({
+                      pulse: i + 1,
+                      raw: v,
+                      smoothed: extractedParams.potentiationSmoothed[i],
+                      fitted: extractedParams.potentiationFitted[i],
+                    }));
+                    const dData = extractedParams.depressionRaw.map((v: number, i: number) => ({
+                      pulse: i + 1,
+                      raw: v,
+                      smoothed: extractedParams.depressionSmoothed[i],
+                      fitted: extractedParams.depressionFitted[i],
+                    }));
+                    exportMultiSection([
+                      { label: 'Potentiation', columns: ['pulse', 'raw', 'smoothed', 'fitted'], data: pData },
+                      { label: 'Depression', columns: ['pulse', 'raw', 'smoothed', 'fitted'], data: dData },
+                    ], 'PD_curves', 'csv');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> P/D Curves (.csv)
+                </button>
+                <button
+                  onClick={() => {
+                    if (!extractedParams) return;
+                    const summary = [
+                      { param: 'G_min (uS)', value: extractedParams.Gmin },
+                      { param: 'G_max (uS)', value: extractedParams.Gmax },
+                      { param: 'On/Off Ratio', value: extractedParams.onOffRatio },
+                      { param: 'Delta_G (uS)', value: extractedParams.dynamicRange },
+                      { param: 'alpha_P', value: extractedParams.alphaP },
+                      { param: 'alpha_D', value: extractedParams.alphaD },
+                      { param: 'R2_P', value: extractedParams.rSquaredP },
+                      { param: 'R2_D', value: extractedParams.rSquaredD },
+                      { param: 'CCV (%)', value: extractedParams.ccvPercent },
+                      { param: 'sigma_w', value: extractedParams.writeNoise },
+                      { param: 'N_levels_P', value: extractedParams.numLevelsP },
+                      { param: 'N_levels_D', value: extractedParams.numLevelsD },
+                      { param: 'Memory_Window (dB)', value: extractedParams.memoryWindow },
+                      { param: 'Prog_Margin (%)', value: extractedParams.programmingMargin },
+                      { param: 'Asymmetry_Index', value: extractedParams.asymmetryIndex },
+                      { param: 'Switching_Uniformity', value: extractedParams.switchingUniformity },
+                    ];
+                    exportChartData(summary, ['param', 'value'], 'extracted_parameters', 'txt');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent/20 border border-accent/40 rounded-lg text-accent hover:bg-accent/30 transition-colors"
+                >
+                  <Download size={12} /> All Parameters (.txt)
+                </button>
+              </div>
             </>
           )}
 
@@ -714,6 +838,21 @@ export function ParametersPage() {
                 plotType={dgChart.plotType}
                 id="delta-g-scatter"
               />
+              {/* deltaG Data Export */}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => exportChartData(deltaGData, ['G', 'dG'], 'deltaG_vs_G', 'txt')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> ΔG vs G (.txt)
+                </button>
+                <button
+                  onClick={() => exportChartData(deltaGData, ['G', 'dG'], 'deltaG_vs_G', 'csv')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-alt border border-border rounded-lg text-text-muted hover:text-text hover:border-accent/50 transition-colors"
+                >
+                  <Download size={12} /> ΔG vs G (.csv)
+                </button>
+              </div>
             </>
           )}
         </div>
