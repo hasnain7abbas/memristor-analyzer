@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Upload, SlidersHorizontal, Calculator, Brain, Download, HelpCircle } from 'lucide-react';
+import { Upload, SlidersHorizontal, Calculator, Brain, Download, HelpCircle, Info } from 'lucide-react';
 import { useAppStore } from '../stores/useAppStore';
 import { HelpDialog } from './HelpDialog';
+import { AboutDialog } from './AboutDialog';
 import type { TabId } from '../types';
 
 const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
@@ -16,6 +17,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { activeTab, setActiveTab, uploadedTests } = useAppStore();
   const hasData = Object.keys(uploadedTests).length > 0;
   const [showHelp, setShowHelp] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   return (
     <div className="min-h-screen bg-bg">
@@ -47,6 +49,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setShowAbout(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-purple hover:bg-purple/10 transition-colors"
+            title="About"
+          >
+            <Info size={16} />
+            About
+          </button>
+          <button
             onClick={() => setShowHelp(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-cyan hover:bg-cyan/10 transition-colors"
             title="Formula Reference & Help"
@@ -67,8 +77,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      {/* Help Dialog */}
+      {/* Dialogs */}
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
     </div>
   );
 }

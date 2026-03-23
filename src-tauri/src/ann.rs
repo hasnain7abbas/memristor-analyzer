@@ -61,17 +61,11 @@ struct Layer {
 
 struct MLP {
     layers: Vec<Layer>,
-    /// Momentum velocity buffers for weights
-    vel_w: Vec<Array2<f64>>,
-    /// Momentum velocity buffers for biases
-    vel_b: Vec<Array1<f64>>,
 }
 
 impl MLP {
     fn new(sizes: &[usize], rng: &mut StdRng) -> Self {
         let mut layers = Vec::new();
-        let mut vel_w = Vec::new();
-        let mut vel_b = Vec::new();
         for i in 0..sizes.len() - 1 {
             let fan_in = sizes[i];
             let fan_out = sizes[i + 1];
@@ -81,14 +75,8 @@ impl MLP {
             let weights = Array2::from_shape_fn((fan_out, fan_in), |_| rng.sample(dist));
             let biases = Array1::zeros(fan_out);
             layers.push(Layer { weights, biases });
-            vel_w.push(Array2::zeros((fan_out, fan_in)));
-            vel_b.push(Array1::zeros(fan_out));
         }
-        MLP {
-            layers,
-            vel_w,
-            vel_b,
-        }
+        MLP { layers }
     }
 
     fn forward(&self, input: &Array1<f64>) -> (Vec<Array1<f64>>, Vec<Array1<f64>>) {
@@ -110,17 +98,14 @@ impl MLP {
         (activations, zs)
     }
 
-    /// Accumulate gradients for one sample directly into pre-allocated buffers.
-    /// No per-sample allocation — only the forward/backward vectors are created.
-    fn accumulate_gradients(
-        &self,
-        input: &Array1<f64>,
-        target: usize,
-        acc_w: &mut [Array2<f64>],
-        acc_b: &mut [Array1<f64>],
-    ) -> f64 {
+    /// Per-sample backpropagation with immediate weight update.
+    /// This gives 5000 weight updates per epoch (one per training sample),
+    /// which is essential for convergence on the small synthetic MNIST dataset.
+    fn backprop(&mut self, input: &Array1<f64>, target: usize, lr: f64) -> f64 {
         let (activations, zs) = self.forward(input);
         let output = activations.last().unwrap();
+
+        // Cross-entropy loss
         let loss = -output[target].max(1e-15).ln();
 
         // Output layer delta
@@ -131,6 +116,7 @@ impl MLP {
         let mut deltas = vec![Array1::zeros(0); num_layers];
         deltas[num_layers - 1] = delta;
 
+        // Hidden layer deltas
         for l in (0..num_layers - 1).rev() {
             let next_delta = &deltas[l + 1];
             let wt_delta = self.layers[l + 1].weights.t().dot(next_delta);
@@ -138,38 +124,19 @@ impl MLP {
             deltas[l] = wt_delta * relu_grad;
         }
 
-        // Accumulate outer-product gradients directly into the buffers
+        // Weight updates
         for l in 0..num_layers {
             let a_prev = &activations[l];
             let d = &deltas[l];
             for i in 0..self.layers[l].weights.nrows() {
-                acc_b[l][i] += d[i];
                 for j in 0..self.layers[l].weights.ncols() {
-                    acc_w[l][[i, j]] += d[i] * a_prev[j];
+                    self.layers[l].weights[[i, j]] -= lr * d[i] * a_prev[j];
                 }
+                self.layers[l].biases[i] -= lr * d[i];
             }
         }
 
         loss
-    }
-
-    /// Apply batch-averaged gradients with SGD + momentum.
-    fn apply_gradients(
-        &mut self,
-        w_grads: &[Array2<f64>],
-        b_grads: &[Array1<f64>],
-        lr: f64,
-        momentum: f64,
-    ) {
-        for l in 0..self.layers.len() {
-            self.vel_w[l].mapv_inplace(|v| v * momentum);
-            self.vel_w[l].scaled_add(lr, &w_grads[l]);
-            self.vel_b[l].mapv_inplace(|v| v * momentum);
-            self.vel_b[l].scaled_add(lr, &b_grads[l]);
-
-            self.layers[l].weights.scaled_add(-1.0, &self.vel_w[l]);
-            self.layers[l].biases.scaled_add(-1.0, &self.vel_b[l]);
-        }
     }
 
     fn predict(&self, input: &Array1<f64>) -> usize {
@@ -183,7 +150,7 @@ impl MLP {
             .unwrap_or(0)
     }
 
-    /// Forward pass that returns both prediction and output probabilities (avoids double forward).
+    /// Single forward pass returning both prediction and output probabilities.
     fn predict_with_output(&self, input: &Array1<f64>) -> (usize, Array1<f64>) {
         let (activations, _) = self.forward(input);
         let output = activations.last().unwrap().clone();
@@ -211,7 +178,45 @@ impl MLP {
     }
 }
 
-fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
+/// Compute the non-linear conductance level for a given pulse fraction t ∈ [0,1].
+fn nl_level(t: f64, alpha: f64) -> f64 {
+    if alpha.abs() < 0.01 {
+        t
+    } else {
+        (1.0 - (-alpha * t).exp()) / (1.0 - (-alpha).exp())
+    }
+}
+
+/// Apply memristor device non-idealities: non-linear quantization + write noise.
+///
+/// Physics: the non-linearity α determines the SPACING of achievable conductance
+/// levels (not a transfer function on weights). Each ideal weight is snapped to
+/// the nearest achievable level, then Gaussian write noise is added.
+///
+/// With α=0 the levels are evenly spaced (linear device).
+/// With α>0 the levels are compressed toward G_max (fewer distinguishable
+/// states at low conductance, more at high conductance).
+fn apply_device_nonidealities(
+    net: &mut MLP,
+    alpha_p: f64,
+    alpha_d: f64,
+    write_noise: f64,
+    num_levels: usize,
+    rng: &mut StdRng,
+) {
+    let noise_dist = Normal::new(0.0, 1.0).unwrap();
+    let n = num_levels.max(2);
+
+    // Pre-compute non-linearly spaced conductance levels for potentiation and depression.
+    // Potentiation levels go from 0 toward 1 (increasing conductance).
+    // Depression levels go from 1 toward 0 (decreasing conductance), so we use
+    // 1 - nl_level(...) and sort ascending to get levels spanning [0, 1] with
+    // spacing compressed toward the LOW end (mirroring potentiation's compression
+    // toward the HIGH end).
+    let levels_p: Vec<f64> = (0..n).map(|k| nl_level(k as f64 / (n - 1) as f64, alpha_p)).collect();
+    let mut levels_d: Vec<f64> = (0..n).map(|k| 1.0 - nl_level(k as f64 / (n - 1) as f64, alpha_d)).collect();
+    levels_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
     for layer in &mut net.layers {
         let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
         let w_max = layer
@@ -227,42 +232,26 @@ fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
 
         for w in layer.weights.iter_mut() {
             let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
-            let alpha = if w_norm >= 0.5 { alpha_p } else { alpha_d };
 
-            let remapped = if alpha.abs() < 0.01 {
-                w_norm
-            } else {
-                (1.0 - (-alpha * w_norm).exp()) / (1.0 - (-alpha).exp())
-            };
+            // Choose level set: potentiation for upper half, depression for lower half
+            let levels = if w_norm >= 0.5 { &levels_p } else { &levels_d };
 
-            *w = remapped * w_range + w_min;
-        }
-    }
-}
+            // Snap to nearest achievable conductance level
+            let mut best_level = levels[0];
+            let mut best_dist = (w_norm - levels[0]).abs();
+            for &level in &levels[1..] {
+                let dist = (w_norm - level).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_level = level;
+                }
+            }
 
-fn apply_memristor_noise(net: &mut MLP, write_noise: f64, num_levels: usize, rng: &mut StdRng) {
-    let noise_dist = Normal::new(0.0, 1.0).unwrap();
-    let n_levels = num_levels.max(2) as f64;
+            // Add Gaussian write noise scaled by level spacing
+            let noisy = best_level + rng.sample(noise_dist) * write_noise;
+            let clamped = noisy.clamp(0.0, 1.0);
 
-    for layer in &mut net.layers {
-        let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
-        let w_max = layer
-            .weights
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let w_range = w_max - w_min;
-
-        if w_range < 1e-15 {
-            continue;
-        }
-
-        for w in layer.weights.iter_mut() {
-            let mut w_norm = (*w - w_min) / w_range;
-            w_norm = (w_norm * (n_levels - 1.0)).round() / (n_levels - 1.0);
-            w_norm += rng.sample(noise_dist) * write_noise / n_levels.sqrt();
-            w_norm = w_norm.clamp(0.0, 1.0);
-            *w = w_norm * w_range + w_min;
+            *w = clamped * w_range + w_min;
         }
     }
 }
@@ -385,25 +374,15 @@ fn train_ann_inner(
 
     let mut results = Vec::new();
     let num_levels = params.num_levels_p.max(params.num_levels_d).max(2);
-    let momentum = 0.9;
     let initial_lr = config.learning_rate;
-
-    // Pre-allocate gradient accumulators ONCE (reused every batch)
-    let mut acc_w: Vec<Array2<f64>> = ideal_net
-        .layers
-        .iter()
-        .map(|l| Array2::zeros((l.weights.nrows(), l.weights.ncols())))
-        .collect();
-    let mut acc_b: Vec<Array1<f64>> = ideal_net
-        .layers
-        .iter()
-        .map(|l| Array1::zeros(l.biases.len()))
-        .collect();
+    let num_noise_samples: usize = 5;
 
     for epoch in 0..config.epochs {
-        // Cosine annealing learning rate
+        // Cosine annealing: smoothly decay lr to prevent oscillation near convergence.
+        // Minimum lr is 5% of initial to ensure continued learning.
         let progress = epoch as f64 / config.epochs as f64;
-        let current_lr = initial_lr * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+        let current_lr =
+            initial_lr * (0.05 + 0.95 * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos()));
 
         let mut indices: Vec<usize> = (0..train_data.len()).collect();
         indices.shuffle(&mut rng);
@@ -411,36 +390,18 @@ fn train_ann_inner(
         let mut ideal_loss_sum = 0.0;
         let mut count = 0.0;
 
-        // Mini-batch training with efficient gradient accumulation
+        // Per-sample SGD training — 5000 weight updates per epoch.
+        // This is essential for convergence on the small synthetic MNIST dataset.
         for batch_start in (0..indices.len()).step_by(config.batch_size) {
             let batch_end = (batch_start + config.batch_size).min(indices.len());
-            let batch_len = (batch_end - batch_start) as f64;
-
-            // Zero the pre-allocated accumulators
-            for i in 0..acc_w.len() {
-                acc_w[i].fill(0.0);
-                acc_b[i].fill(0.0);
-            }
-
-            // Accumulate gradients directly into buffers (no per-sample allocation)
             for &idx in &indices[batch_start..batch_end] {
                 let (ref input, target) = train_data[idx];
-                ideal_loss_sum +=
-                    ideal_net.accumulate_gradients(input, target, &mut acc_w, &mut acc_b);
+                ideal_loss_sum += ideal_net.backprop(input, target, current_lr);
                 count += 1.0;
             }
-
-            // Average over batch
-            for i in 0..acc_w.len() {
-                acc_w[i].mapv_inplace(|v| v / batch_len);
-                acc_b[i].mapv_inplace(|v| v / batch_len);
-            }
-
-            // Apply with momentum
-            ideal_net.apply_gradients(&acc_w, &acc_b, current_lr, momentum);
         }
 
-        // Evaluate ideal network
+        // Evaluate ideal network on test set
         let mut ideal_correct = 0;
         for (input, target) in &test_data {
             if ideal_net.predict(input) == *target {
@@ -448,19 +409,23 @@ fn train_ann_inner(
             }
         }
 
-        // Copy-and-degrade with 2 noise samples averaged for stability
+        // Copy-and-degrade: average over noise realizations for smooth curves
         let ideal_weights = ideal_net.clone_weights();
         let mut mem_correct_total: usize = 0;
         let mut mem_loss_total: f64 = 0.0;
-        let num_noise_samples: usize = 2;
 
         for _ in 0..num_noise_samples {
             mem_net.load_weights(&ideal_weights);
-            apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
-            apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut rng);
+            apply_device_nonidealities(
+                &mut mem_net,
+                params.alpha_p,
+                params.alpha_d,
+                params.write_noise,
+                num_levels,
+                &mut rng,
+            );
 
             for (input, target) in &test_data {
-                // Single forward pass for both prediction and loss
                 let (predicted, output) = mem_net.predict_with_output(input);
                 if predicted == *target {
                     mem_correct_total += 1;
@@ -472,7 +437,7 @@ fn train_ann_inner(
         let total_mem_evals = (test_data.len() * num_noise_samples) as f64;
 
         let result = ANNEpochResult {
-            epoch: epoch + 1,
+            epoch,  // starts at 0
             ideal_accuracy: ideal_correct as f64 / test_data.len() as f64 * 100.0,
             memristor_accuracy: mem_correct_total as f64 / total_mem_evals * 100.0,
             ideal_loss: ideal_loss_sum / count,

@@ -7,6 +7,7 @@ import type {
   ANNEpochResult,
   GraphStyle,
   UploadedTest,
+  CycleConfig,
 } from '../types';
 
 interface AppState {
@@ -38,6 +39,9 @@ interface AppState {
 
   graphStyle: GraphStyle;
   setGraphStyle: (style: Partial<GraphStyle>) => void;
+
+  cycleConfig: CycleConfig;
+  setCycleConfig: (config: Partial<CycleConfig>) => void;
 
   vRead: number;
   setVRead: (v: number) => void;
@@ -83,7 +87,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   annConfig: {
     modelType: 'mlp_1h',
-    hiddenSize: 128,
+    hiddenSize: 256,
     hiddenSize2: 64,
     epochs: 50,
     learningRate: 0.03,
@@ -122,6 +126,14 @@ export const useAppStore = create<AppState>((set) => ({
   },
   setGraphStyle: (style) =>
     set((s) => ({ graphStyle: { ...s.graphStyle, ...style } })),
+
+  cycleConfig: {
+    pulsesPerP: 50,
+    pulsesPerD: 50,
+    autoDetect: true,
+  },
+  setCycleConfig: (config) =>
+    set((s) => ({ cycleConfig: { ...s.cycleConfig, ...config } })),
 
   vRead: 0.1,
   setVRead: (v) => set({ vRead: v }),

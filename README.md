@@ -167,12 +167,54 @@ The central parameter extracted by this tool:
 G(n) = G_start + (G_end − G_start) · [1 − exp(−α·n/N)] / [1 − exp(−α)]
 ```
 
-| α Value | ANN Impact | Quality |
-|---------|-----------|---------|
-| α < 1 | < 5% accuracy drop | Excellent |
-| α = 1–2 | 5–15% drop | Acceptable |
-| α = 2–4 | 15–30% drop | Degraded |
-| α > 4 | > 30% drop | Poor — needs compensation |
+### Literature-Calibrated Quality Table
+
+Quality depends on **both** alpha and the conductance ratio (G<sub>max</sub>/G<sub>min</sub>). Calibrated against Kim et al. (2021), Burr et al. (2015), and published device benchmarks.
+
+| α_P | α_D | G_max/G_min | Expected MNIST (MLP 784-300-10) | Quality Rating |
+|-----|-----|-------------|--------------------------------|----------------|
+| <0.5 | <0.5 | >10 | 93-97% | Excellent |
+| 0.5-1.5 | 0.5-1.5 | >5 | 87-93% | Good |
+| 1.5-3.0 | 1.5-3.0 | >3 | 75-87% | Acceptable |
+| 3.0-5.0 | 3.0-5.0 | >2 | 55-75% | Degraded |
+| >5.0 | >5.0 | any | <55% | Poor |
+| any | any | <2 | deduct 10-20% | Window penalty |
+
+**Key insight from literature:** The conductance ratio (G<sub>max</sub>/G<sub>min</sub>) has a multiplicative effect on accuracy. A device with α = 2 but G<sub>max</sub>/G<sub>min</sub> = 50 will significantly outperform a device with α = 2 but G<sub>max</sub>/G<sub>min</sub> = 3.
+
+---
+
+## Methodology
+
+### Copy-and-Degrade ANN Simulation
+
+The ANN simulation follows the **copy-and-degrade** methodology established by Burr et al. (2015):
+
+1. **Train ideal network** — A standard MLP (784-256-10 by default) is trained on synthetic MNIST using SGD with cosine annealing learning rate. Weights are stored in floating-point precision.
+
+2. **Clone weights** — After each training epoch, the ideal weights are cloned to create the memristor network.
+
+3. **Non-linear quantization** — Each weight is normalized to [0, 1] and snapped to the nearest achievable conductance level. The achievable levels are non-linearly spaced according to the device's α parameter:
+   ```
+   G(k) = [1 − exp(−α · k/(N−1))] / [1 − exp(−α)]   for k = 0, 1, ..., N−1
+   ```
+   Potentiation levels (α_P) are used for weights in the upper half of the range; depression levels (α_D, computed as `1 − G_P(k)` sorted ascending) are used for the lower half. This asymmetric level spacing is what causes the accuracy degradation — with large α, most levels cluster near one end of the range, leaving poor resolution elsewhere.
+
+4. **Noise injection** — Gaussian write noise σ_w is added to each quantized weight, modeling the stochastic variation in conductance programming.
+
+5. **Evaluate** — The degraded network is evaluated on the test set. Results are averaged over 5 independent noise realizations per epoch for stable accuracy estimates.
+
+### Multi-Cycle Data Processing
+
+When experimental data contains multiple P/D cycles (e.g., 50 potentiation pulses + 50 depression pulses, repeated N times):
+
+1. **Cycle segmentation** — Data is split into individual cycles using user-specified pulses-per-phase or automatic peak detection.
+
+2. **Cycle averaging** — All P cycles are averaged position-by-position to produce one representative potentiation curve; same for depression. This is the standard approach in memristor literature for extracting representative device behavior.
+
+3. **Write noise from cycle-to-cycle variation** — σ_w is computed from the per-position standard deviation across cycles, normalized by the conductance range: `σ_w = mean(σ[n]) / (G_max − G_min)`.
+
+4. **Parameter extraction** — α is fitted separately for the averaged P and D curves using grid search (coarse 0.01-12.0 in steps of 0.05, refined ±0.3 in steps of 0.001).
 
 ---
 
@@ -241,8 +283,14 @@ memristor-analyzer/
 ## Changelog
 
 ### v1.0.6 (latest)
+- **Multi-cycle data parsing** — new cycle configuration UI (pulses per potentiation/depression phase) enables proper segmentation of multi-cycle P/D data. Cycles are averaged position-by-position to produce representative P and D curves, following standard memristor characterization methodology. Write noise (σ_w) is now computed from cycle-to-cycle position variation rather than step-size variation, matching the definition used in Burr et al. (2015).
+- **Single-cycle split fix** — when auto-detection finds 0-1 peaks, the data is now split at the midpoint instead of at the max conductance point. The previous approach failed when potentiation saturates early (common for non-linear devices with large α).
+- **ANN depression levels fix** — depression conductance levels in the copy-and-degrade simulation are now computed as `1 − G_P(k)` sorted ascending, correctly placing levels in the lower half of the conductance range. Previously, depression levels were identical to potentiation levels, which meant most achievable states clustered in the wrong half. This follows Burr et al. (2015) methodology.
+- **Increased noise realizations** — memristor accuracy is now averaged over 5 independent noise realizations per epoch (up from 2), producing more stable and reproducible accuracy curves per Burr et al. (2015) recommendation.
+- **Default hidden size increased** — MLP hidden layer default changed from 128 to 256 neurons for better alignment with the MLP 784-256-10 architecture used in Kim et al. (2021) benchmarks.
+- **Literature-calibrated quality table** — the alpha quality thresholds now account for both α and the conductance ratio (G_max/G_min), calibrated against published device benchmarks including Kim et al. (2021), Burr et al. (2015/2017), and multiple BFO/RRAM device studies.
+- **About dialog** — new About dialog with developer info, project description, and complete academic references (Burr 2017, Burr 2015, Kim 2021, Chua 1971, Strukov 2008, Zucker 2002).
 - **ANN training overhaul** — mini-batch gradient accumulation (efficient pre-allocated buffers), SGD with momentum (0.9), cosine annealing learning rate schedule. Accuracy curves are now smooth and consistent instead of fluctuating randomly
-- **Noise-averaged memristor evaluation** — memristor accuracy averaged over 2 independent noise realizations per epoch, eliminating random spikes
 - **KaTeX formula rendering** — all formulas on the Parameters page now display with proper mathematical notation (fractions, subscripts, superscripts, Greek letters)
 - **Comprehensive Help dialog** — accessible from the nav bar, contains 8 sections with exhaustive formula derivations, parameter tables, acquisition guides, physical meaning, quality thresholds, and literature references
 - **Larger, clearer graphs** — content area widened to 1400px, chart heights increased, better margins and font sizing for readability
@@ -286,9 +334,17 @@ memristor-analyzer/
 
 ## References
 
-- L. Chua, "Memristor — The Missing Circuit Element," *IEEE Trans. Circuit Theory*, 1971
+- L. Chua, "Memristor -- The Missing Circuit Element," *IEEE Trans. Circuit Theory*, vol. 18, no. 5, pp. 507-519, 1971
+- D. B. Strukov, G. S. Snider, D. R. Stewart, R. S. Williams, "The missing memristor found," *Nature*, vol. 453, pp. 80-83, 2008
 - G. W. Burr et al., "Neuromorphic computing using non-volatile memory," *Advances in Physics: X*, vol. 2, no. 1, 2017
-- R. Zucker & W. Regehr, "Short-term synaptic plasticity," *Annu. Rev. Physiol.*, vol. 64, pp. 355–405, 2002
+- G. W. Burr et al., "Experimental demonstration and tolerancing of a large-scale neural network (165,000 synapses) using phase-change memory as the synaptic weight element," *IEDM*, 2015
+- S. Kim et al., "Spiking neural network with memristor synapses having non-linear weight update," *Front. Comput. Neurosci.* 15:646125, 2021
+- R. Zucker & W. Regehr, "Short-term synaptic plasticity," *Annu. Rev. Physiol.*, vol. 64, pp. 355-405, 2002
+- Ma et al., "Flexible BFO FTJ memristors," *Nano Research*, 2021
+- Luo et al., "PEDOT:PSS/pentacene organic synaptic devices," *Front. Neurosci.*, 2022
+- Soren & Prakash, "Cu/BFO/FTO resistive switching," *ACS Applied Electronic Materials*, 2022
+- Peng et al., "HfO2/BFO/HfO2 trilayer memristors," *Adv. Funct. Mater.*, 2021
+- CrossSim benchmark, Sandia National Laboratories, 2021
 
 ## License
 

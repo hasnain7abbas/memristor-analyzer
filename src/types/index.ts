@@ -122,6 +122,12 @@ export interface UploadedTest {
   vRead?: number;
 }
 
+export interface CycleConfig {
+  pulsesPerP: number;
+  pulsesPerD: number;
+  autoDetect: boolean;
+}
+
 export type FrameworkType = 'pytorch' | 'crosssim' | 'neurosim' | 'memtorch';
 
 export interface FormulaSection {

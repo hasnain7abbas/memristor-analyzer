@@ -157,8 +157,112 @@ const FORMULAS: FormulaDefinition[] = [
   },
 ];
 
+/**
+ * Auto-detect potentiation/depression cycles from raw conductance data.
+ * Handles both single-sweep (one P then one D) and multi-cycle data
+ * (e.g., 50 pulses up, 50 pulses down, repeated N times).
+ *
+ * For multi-cycle data: detects the cycle period from peak spacing,
+ * then extracts a representative P and D curve by averaging across
+ * all cycles (aligned by pulse position within each half-cycle).
+ */
+function autoDetectPDCycles(values: number[]): { potentiation: number[]; depression: number[] } {
+  const n = values.length;
+  if (n < 4) return { potentiation: values, depression: [] };
+
+  // Smooth for peak detection (moving average)
+  const winSize = Math.max(3, Math.min(11, Math.floor(n / 20)));
+  const smoothed: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - Math.floor(winSize / 2));
+    const hi = Math.min(n, i + Math.floor(winSize / 2) + 1);
+    let sum = 0;
+    for (let j = lo; j < hi; j++) sum += values[j];
+    smoothed.push(sum / (hi - lo));
+  }
+
+  // Find major peaks (local max within a window)
+  const peakWindow = Math.max(5, Math.floor(n / 40));
+  const peaks: number[] = [];
+  for (let i = peakWindow; i < n - peakWindow; i++) {
+    let isMax = true;
+    for (let j = i - peakWindow; j <= i + peakWindow; j++) {
+      if (j !== i && smoothed[j] > smoothed[i]) { isMax = false; break; }
+    }
+    if (isMax && (peaks.length === 0 || i - peaks[peaks.length - 1] > peakWindow * 2)) {
+      peaks.push(i);
+    }
+  }
+
+  // Multi-cycle: need at least 2 peaks with consistent spacing
+  if (peaks.length >= 2) {
+    // Calculate cycle period from peak-to-peak distances
+    const spacings: number[] = [];
+    for (let i = 1; i < peaks.length; i++) spacings.push(peaks[i] - peaks[i - 1]);
+    spacings.sort((a, b) => a - b);
+    const period = spacings[Math.floor(spacings.length / 2)]; // median
+    const halfPeriod = Math.floor(period / 2);
+
+    // Extract P and D segments centered on each peak:
+    //   P = [peak - halfPeriod, peak]  (rising to peak)
+    //   D = [peak, peak + halfPeriod]  (falling from peak)
+    // Then average across all cycles for a representative curve.
+    const allP: number[][] = [];
+    const allD: number[][] = [];
+
+    for (const pk of peaks) {
+      const pStart = Math.max(0, pk - halfPeriod);
+      const dEnd = Math.min(n - 1, pk + halfPeriod);
+      if (pk - pStart >= 5) allP.push(values.slice(pStart, pk + 1));
+      if (dEnd - pk >= 5) allD.push(values.slice(pk, dEnd + 1));
+    }
+
+    if (allP.length >= 1 && allD.length >= 1) {
+      // Average all P segments (interpolated to the median length)
+      const pAvg = averageAlignedSegments(allP);
+      const dAvg = averageAlignedSegments(allD);
+
+      if (pAvg.length >= 4 && dAvg.length >= 4) {
+        return { potentiation: pAvg, depression: dAvg };
+      }
+    }
+  }
+
+  // Fallback: single-sweep — split at MIDPOINT (not max conductance point).
+  // Splitting at max-conductance breaks when potentiation saturates early,
+  // which is the common case for non-linear devices.
+  const mid = Math.floor(n / 2);
+  return { potentiation: values.slice(0, mid), depression: values.slice(mid) };
+}
+
+/** Average multiple segments of possibly different lengths into one representative curve. */
+function averageAlignedSegments(segments: number[][]): number[] {
+  if (segments.length === 0) return [];
+  if (segments.length === 1) return segments[0];
+
+  // Use the median length as the target
+  const lengths = segments.map(s => s.length).sort((a, b) => a - b);
+  const targetLen = lengths[Math.floor(lengths.length / 2)];
+
+  // Linearly interpolate each segment to targetLen, then average
+  const result: number[] = new Array(targetLen).fill(0);
+  for (const seg of segments) {
+    for (let i = 0; i < targetLen; i++) {
+      // Map index i in [0, targetLen-1] to position in segment
+      const pos = (i / (targetLen - 1)) * (seg.length - 1);
+      const lo = Math.floor(pos);
+      const hi = Math.min(lo + 1, seg.length - 1);
+      const frac = pos - lo;
+      result[i] += seg[lo] * (1 - frac) + seg[hi] * frac;
+    }
+  }
+  for (let i = 0; i < targetLen; i++) result[i] /= segments.length;
+
+  return result;
+}
+
 export function ParametersPage() {
-  const { uploadedTests, smoothingConfig, extractedParams, setExtractedParams, vRead, setVRead, isCurrentInput } =
+  const { uploadedTests, smoothingConfig, extractedParams, setExtractedParams, vRead, setVRead, isCurrentInput, cycleConfig, setCycleConfig } =
     useAppStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -203,26 +307,142 @@ export function ParametersPage() {
       const typeColName = mapping['type'] || ds.headers.find((h) => /type|phase/i.test(h));
       let pRaw: number[];
       let dRaw: number[];
+      let computedWriteNoise: number | null = null;
+
+      // Helper: segment values using pulsesPerP / pulsesPerD and average across cycles.
+      // Also computes write noise (sigma_w) from per-position std across cycles.
+      const segmentByCycleConfig = (vals: number[]): { p: number[]; d: number[]; sigmaW: number | null } => {
+        const cycleLen = cycleConfig.pulsesPerP + cycleConfig.pulsesPerD;
+        const numCycles = Math.floor(vals.length / cycleLen);
+        if (numCycles < 1) {
+          // Not enough data for even one cycle; split at midpoint
+          const mid = Math.floor(vals.length / 2);
+          return { p: vals.slice(0, mid), d: vals.slice(mid), sigmaW: null };
+        }
+        const pCycles: number[][] = [];
+        const dCycles: number[][] = [];
+        for (let c = 0; c < numCycles; c++) {
+          const start = c * cycleLen;
+          pCycles.push(vals.slice(start, start + cycleConfig.pulsesPerP));
+          dCycles.push(vals.slice(start + cycleConfig.pulsesPerP, start + cycleLen));
+        }
+        const pAvg = averageAlignedSegments(pCycles);
+        const dAvg = averageAlignedSegments(dCycles);
+
+        // Compute sigma_w from per-position std across cycles
+        let sigmaW: number | null = null;
+        if (numCycles > 1) {
+          let sumStd = 0;
+          let countPositions = 0;
+          // Compute per-position std across P cycles
+          for (const cycles of [pCycles, dCycles]) {
+            const len = cycles[0]?.length ?? 0;
+            for (let pos = 0; pos < len; pos++) {
+              const posVals = cycles.map(c => c[pos]).filter(v => v !== undefined);
+              if (posVals.length > 1) {
+                const mean = posVals.reduce((a, b) => a + b, 0) / posVals.length;
+                const variance = posVals.reduce((a, v) => a + (v - mean) ** 2, 0) / (posVals.length - 1);
+                sumStd += Math.sqrt(variance);
+                countPositions++;
+              }
+            }
+          }
+          if (countPositions > 0) {
+            const allVals = [...pAvg, ...dAvg];
+            const gMin = Math.min(...allVals);
+            const gMax = Math.max(...allVals);
+            const range = gMax - gMin;
+            if (range > 1e-15) {
+              sigmaW = (sumStd / countPositions) / range;
+            }
+          }
+        }
+        return { p: pAvg, d: dAvg, sigmaW };
+      };
 
       if (typeColName) {
         const typeVals = ds.rows.map((r) => String(r[typeColName] || '').toLowerCase());
-        pRaw = values.filter((_, i) => /^p|pot|ltp/i.test(typeVals[i]));
-        dRaw = values.filter((_, i) => /^d|dep|ltd/i.test(typeVals[i]));
-        if (pRaw.length === 0 || dRaw.length === 0) {
-          const peakIdx = values.indexOf(Math.max(...values));
-          pRaw = values.slice(0, peakIdx + 1);
-          dRaw = values.slice(peakIdx);
-        }
-      } else {
-        const peakIdx = values.indexOf(Math.max(...values));
-        if (peakIdx > values.length * 0.8 || peakIdx < values.length * 0.2) {
-          const mid = Math.floor(values.length / 2);
-          pRaw = values.slice(0, mid);
-          dRaw = values.slice(mid);
+        const allP = values.filter((_, i) => /^p|pot|ltp/i.test(typeVals[i]));
+        const allD = values.filter((_, i) => /^d|dep|ltd/i.test(typeVals[i]));
+
+        if (allP.length === 0 || allD.length === 0) {
+          // Phase column exists but no recognized labels; use cycle config or midpoint
+          if (!cycleConfig.autoDetect) {
+            const seg = segmentByCycleConfig(values);
+            pRaw = seg.p;
+            dRaw = seg.d;
+            computedWriteNoise = seg.sigmaW;
+          } else {
+            const mid = Math.floor(values.length / 2);
+            pRaw = values.slice(0, mid);
+            dRaw = values.slice(mid);
+          }
         } else {
-          pRaw = values.slice(0, peakIdx + 1);
-          dRaw = values.slice(peakIdx);
+          // Detect multi-cycle: find where phase transitions happen (P->D or D->P).
+          const pCycles: number[][] = [];
+          const dCycles: number[][] = [];
+          let currentPhase = typeVals[0];
+          let currentBlock: number[] = [];
+
+          for (let i = 0; i < values.length; i++) {
+            const phase = typeVals[i];
+            if (!(/^p|pot|ltp/i.test(phase) || /^d|dep|ltd/i.test(phase))) continue;
+            if (phase !== currentPhase && currentBlock.length > 0) {
+              if (/^p|pot|ltp/i.test(currentPhase)) pCycles.push(currentBlock);
+              else if (/^d|dep|ltd/i.test(currentPhase)) dCycles.push(currentBlock);
+              currentBlock = [];
+              currentPhase = phase;
+            }
+            currentBlock.push(values[i]);
+          }
+          if (currentBlock.length > 0) {
+            if (/^p|pot|ltp/i.test(currentPhase)) pCycles.push(currentBlock);
+            else if (/^d|dep|ltd/i.test(currentPhase)) dCycles.push(currentBlock);
+          }
+
+          if (pCycles.length > 1 || dCycles.length > 1) {
+            pRaw = averageAlignedSegments(pCycles);
+            dRaw = averageAlignedSegments(dCycles);
+            // Compute sigma_w from cycle-to-cycle variation
+            let sumStd = 0;
+            let countPositions = 0;
+            for (const cycles of [pCycles, dCycles]) {
+              const len = Math.min(...cycles.map(c => c.length));
+              for (let pos = 0; pos < len; pos++) {
+                const posVals = cycles.map(c => c[pos]);
+                if (posVals.length > 1) {
+                  const mean = posVals.reduce((a, b) => a + b, 0) / posVals.length;
+                  const variance = posVals.reduce((a, v) => a + (v - mean) ** 2, 0) / (posVals.length - 1);
+                  sumStd += Math.sqrt(variance);
+                  countPositions++;
+                }
+              }
+            }
+            if (countPositions > 0) {
+              const allAvg = [...pRaw, ...dRaw];
+              const gMin = Math.min(...allAvg);
+              const gMax = Math.max(...allAvg);
+              const range = gMax - gMin;
+              if (range > 1e-15) {
+                computedWriteNoise = (sumStd / countPositions) / range;
+              }
+            }
+          } else {
+            pRaw = allP;
+            dRaw = allD;
+          }
         }
+      } else if (!cycleConfig.autoDetect) {
+        // User-specified cycle structure: segment by pulsesPerP / pulsesPerD
+        const seg = segmentByCycleConfig(values);
+        pRaw = seg.p;
+        dRaw = seg.d;
+        computedWriteNoise = seg.sigmaW;
+      } else {
+        // Auto-detect P/D cycles by finding local peaks and valleys.
+        const detected = autoDetectPDCycles(values);
+        pRaw = detected.potentiation;
+        dRaw = detected.depression;
       }
 
       const cycleColName = mapping['cycle'] || ds.headers.find((h) => /cycle/i.test(h));
@@ -257,6 +477,10 @@ export function ParametersPage() {
         multiCycleData,
       });
 
+      // If we computed a better write noise from cycle-to-cycle variation, override
+      if (computedWriteNoise !== null && computedWriteNoise > 0) {
+        result.writeNoise = computedWriteNoise;
+      }
       setExtractedParams(result);
     } catch (e) {
       setError(String(e));
@@ -266,6 +490,18 @@ export function ParametersPage() {
   };
 
   const rQuality = (r2: number) => (r2 >= 0.95 ? 'good' : r2 >= 0.85 ? 'ok' : 'poor');
+
+  // Literature-calibrated quality assessment: combined alpha + conductance ratio
+  // Based on Kim et al. 2021, Burr et al. 2015, Burr et al. 2017
+  const alphaQuality = (alpha: number): 'good' | 'ok' | 'poor' => {
+    const ratio = extractedParams ? extractedParams.onOffRatio : 10;
+    // Window penalty: low conductance ratio degrades quality
+    const penalty = ratio < 2 ? 2 : ratio < 3 ? 1 : 0;
+    const effectiveAlpha = alpha + penalty;
+    if (effectiveAlpha < 1.5 && ratio > 5) return 'good';
+    if (effectiveAlpha < 3.0 && ratio > 3) return 'ok';
+    return 'poor';
+  };
 
   // Build chart data
   const pdChartData = extractedParams
@@ -315,7 +551,7 @@ export function ParametersPage() {
 
       {/* Extraction controls */}
       <div className="bg-surface rounded-xl border border-border p-4 space-y-4">
-        <div className="flex items-end gap-4">
+        <div className="flex items-end gap-4 flex-wrap">
           <div>
             <label className="block text-xs text-text-muted mb-1">V_read (V)</label>
             <input
@@ -339,6 +575,55 @@ export function ParametersPage() {
             </span>
           )}
         </div>
+
+        {/* Cycle Configuration */}
+        <div className="border-t border-border/50 pt-3">
+          <div className="flex items-center gap-3 mb-3">
+            <h4 className="text-sm font-medium text-text">Cycle Structure</h4>
+            <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
+              <input
+                type="checkbox"
+                checked={cycleConfig.autoDetect}
+                onChange={(e) => setCycleConfig({ autoDetect: e.target.checked })}
+                className="accent-accent"
+              />
+              Auto-detect
+            </label>
+          </div>
+          {!cycleConfig.autoDetect && (
+            <div className="flex items-end gap-4">
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Pulses per Potentiation</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={cycleConfig.pulsesPerP}
+                  onChange={(e) => setCycleConfig({ pulsesPerP: Math.max(1, parseInt(e.target.value) || 50) })}
+                  className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-28 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Pulses per Depression</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={cycleConfig.pulsesPerD}
+                  onChange={(e) => setCycleConfig({ pulsesPerD: Math.max(1, parseInt(e.target.value) || 50) })}
+                  className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm text-text w-28 font-mono"
+                />
+              </div>
+              {pdTest && (
+                <span className="text-xs text-text-dim">
+                  {Math.floor(
+                    (pdTest.dataset.rows.length) / (cycleConfig.pulsesPerP + cycleConfig.pulsesPerD)
+                  )}{' '}
+                  cycle(s) detected from {pdTest.dataset.rows.length} rows
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
         {error && <p className="text-sm text-red">{error}</p>}
       </div>
 
@@ -356,12 +641,12 @@ export function ParametersPage() {
             <StatCard
               label="α_P (Potentiation)"
               value={extractedParams.alphaP.toFixed(3)}
-              quality={extractedParams.alphaP < 2 ? 'good' : extractedParams.alphaP < 4 ? 'ok' : 'poor'}
+              quality={alphaQuality(extractedParams.alphaP)}
             />
             <StatCard
               label="α_D (Depression)"
               value={extractedParams.alphaD.toFixed(3)}
-              quality={extractedParams.alphaD < 2 ? 'good' : extractedParams.alphaD < 4 ? 'ok' : 'poor'}
+              quality={alphaQuality(extractedParams.alphaD)}
             />
             <StatCard
               label="R² (P)"

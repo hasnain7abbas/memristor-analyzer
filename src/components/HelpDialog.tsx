@@ -307,15 +307,94 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
               </p>
             </SubSection>
 
-            <SubSection title="Impact on ANN Accuracy">
-              <table className="text-left">
+            <SubSection title="Impact on ANN Accuracy (Literature-Calibrated)">
+              <p className="mb-2">
+                Quality depends on <strong className="text-text">both</strong> alpha and the conductance ratio (G<sub>max</sub>/G<sub>min</sub>).
+                Table calibrated against Kim et al. (2021), Burr et al. (2015), and published device benchmarks.
+              </p>
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="py-1.5 pr-3 text-text-muted font-medium">α_P</th>
+                    <th className="py-1.5 pr-3 text-text-muted font-medium">α_D</th>
+                    <th className="py-1.5 pr-3 text-text-muted font-medium">G_max/G_min</th>
+                    <th className="py-1.5 pr-3 text-text-muted font-medium">MNIST (MLP 784-300-10)</th>
+                    <th className="py-1.5 text-text-muted font-medium">Quality</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  <QualityRow range="α < 1" label="< 5% accuracy drop (excellent)" color="text-green" />
-                  <QualityRow range="α = 1–2" label="5–15% accuracy drop (acceptable)" color="text-green" />
-                  <QualityRow range="α = 2–4" label="15–30% accuracy drop (degraded)" color="text-amber" />
-                  <QualityRow range="α > 4" label="> 30% accuracy drop (poor — needs compensation)" color="text-red" />
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">&lt;0.5</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&lt;0.5</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;10</td>
+                    <td className="py-1.5 pr-3 text-text">93-97%</td>
+                    <td className="py-1.5 font-medium text-green">Excellent</td>
+                  </tr>
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">0.5-1.5</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">0.5-1.5</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;5</td>
+                    <td className="py-1.5 pr-3 text-text">87-93%</td>
+                    <td className="py-1.5 font-medium text-green">Good</td>
+                  </tr>
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">1.5-3.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">1.5-3.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;3</td>
+                    <td className="py-1.5 pr-3 text-text">75-87%</td>
+                    <td className="py-1.5 font-medium text-amber">Acceptable</td>
+                  </tr>
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">3.0-5.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">3.0-5.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;2</td>
+                    <td className="py-1.5 pr-3 text-text">55-75%</td>
+                    <td className="py-1.5 font-medium text-amber">Degraded</td>
+                  </tr>
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;5.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&gt;5.0</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">any</td>
+                    <td className="py-1.5 pr-3 text-text">&lt;55%</td>
+                    <td className="py-1.5 font-medium text-red">Poor</td>
+                  </tr>
+                  <tr className="border-b border-border/50">
+                    <td className="py-1.5 pr-3 font-mono text-text">any</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">any</td>
+                    <td className="py-1.5 pr-3 font-mono text-text">&lt;2</td>
+                    <td className="py-1.5 pr-3 text-text">deduct 10-20%</td>
+                    <td className="py-1.5 font-medium text-red">Window penalty</td>
+                  </tr>
                 </tbody>
               </table>
+              <p className="mt-2 text-xs text-text-dim">
+                Key insight: the conductance ratio has a multiplicative effect on accuracy. A device with α = 2 but
+                G<sub>max</sub>/G<sub>min</sub> = 50 significantly outperforms one with α = 2 but G<sub>max</sub>/G<sub>min</sub> = 3.
+              </p>
+            </SubSection>
+
+            <SubSection title="Published Device Benchmarks">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="py-1 pr-2 text-text-muted font-medium">Device</th>
+                      <th className="py-1 pr-2 text-text-muted font-medium">α_P</th>
+                      <th className="py-1 pr-2 text-text-muted font-medium">α_D</th>
+                      <th className="py-1 pr-2 text-text-muted font-medium">Ratio</th>
+                      <th className="py-1 pr-2 text-text-muted font-medium">MNIST</th>
+                      <th className="py-1 text-text-muted font-medium">Ref</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-text-muted">
+                    <tr className="border-b border-border/30"><td className="py-1 pr-2">Flexible BFO FTJ</td><td className="py-1 pr-2 font-mono">~0.24</td><td className="py-1 pr-2 font-mono">~0.24</td><td className="py-1 pr-2">&gt;100</td><td className="py-1 pr-2">92.8%</td><td className="py-1">Ma et al. 2021</td></tr>
+                    <tr className="border-b border-border/30"><td className="py-1 pr-2">PEDOT:PSS organic</td><td className="py-1 pr-2 font-mono">1.51</td><td className="py-1 pr-2 font-mono">2.20</td><td className="py-1 pr-2">~10</td><td className="py-1 pr-2">92.6%</td><td className="py-1">Luo et al. 2022</td></tr>
+                    <tr className="border-b border-border/30"><td className="py-1 pr-2">Cu/BFO/FTO</td><td className="py-1 pr-2 font-mono">~1-2</td><td className="py-1 pr-2 font-mono">~1-2</td><td className="py-1 pr-2">&gt;10</td><td className="py-1 pr-2">96%</td><td className="py-1">Soren &amp; Prakash 2022</td></tr>
+                    <tr className="border-b border-border/30"><td className="py-1 pr-2">Au/Mn-BFO/TiN</td><td className="py-1 pr-2 font-mono">&lt;1</td><td className="py-1 pr-2 font-mono">&lt;1</td><td className="py-1 pr-2">high</td><td className="py-1 pr-2">98.8%</td><td className="py-1">IEEE TED 2023</td></tr>
+                    <tr className="border-b border-border/30"><td className="py-1 pr-2">TaOx/HfOx RRAM</td><td className="py-1 pr-2 font-mono">0.5-3</td><td className="py-1 pr-2 font-mono">0.5-3</td><td className="py-1 pr-2">5-50</td><td className="py-1 pr-2">85-95%</td><td className="py-1">CrossSim, Sandia 2021</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </SubSection>
 
             <SubSection title="Reference">
@@ -551,7 +630,7 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
                 <li><strong className="text-text">Activations</strong>: ReLU (hidden layers), Softmax (output layer).</li>
                 <li><strong className="text-text">Initialization</strong>: He initialization <Tex math="\sigma = \sqrt{2/\text{fan\_in}}" /></li>
                 <li><strong className="text-text">Batch training</strong>: Gradients are accumulated over each mini-batch and averaged before the weight update.</li>
-                <li><strong className="text-text">Noise averaging</strong>: Memristor accuracy is averaged over 3 independent noise realizations per epoch for stability.</li>
+                <li><strong className="text-text">Noise averaging</strong>: Memristor accuracy is averaged over 5 independent noise realizations per epoch for stability (per Burr et al. 2015 recommendation).</li>
                 <li><strong className="text-text">Data</strong>: 5,000 synthetic MNIST training images, 1,000 test images (in-app). Python scripts use real MNIST (60,000 images).</li>
               </ul>
             </SubSection>
