@@ -15,6 +15,7 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "d3": "^7.9.0",
+    "katex": "^0.16.40",
     "lucide-react": "^0.576.0",
     "mathjs": "^15.1.1",
     "papaparse": "^5.5.3",

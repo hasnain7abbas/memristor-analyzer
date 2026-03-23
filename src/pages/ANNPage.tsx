@@ -388,7 +388,7 @@ export function ANNPage() {
                 title="Accuracy vs Epoch"
                 caption={accChart.caption}
                 plotType={accChart.plotType}
-                heightOverride={400}
+                heightOverride={520}
                 id="ann-accuracy"
               />
 
@@ -417,7 +417,7 @@ export function ANNPage() {
               </div>
             </>
           ) : (
-            <div className="flex items-center justify-center h-[400px] bg-surface rounded-xl border border-border text-text-dim">
+            <div className="flex items-center justify-center h-[520px] bg-surface rounded-xl border border-border text-text-dim">
               {extractedParams
                 ? 'Click "Train In-App" to start the simulation'
                 : 'Extract parameters first on the Parameters tab'}

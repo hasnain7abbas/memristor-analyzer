@@ -1,5 +1,7 @@
-import { Upload, SlidersHorizontal, Calculator, Brain, Download } from 'lucide-react';
+import { useState } from 'react';
+import { Upload, SlidersHorizontal, Calculator, Brain, Download, HelpCircle } from 'lucide-react';
 import { useAppStore } from '../stores/useAppStore';
+import { HelpDialog } from './HelpDialog';
 import type { TabId } from '../types';
 
 const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
@@ -13,6 +15,7 @@ const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
 export function Layout({ children }: { children: React.ReactNode }) {
   const { activeTab, setActiveTab, uploadedTests } = useAppStore();
   const hasData = Object.keys(uploadedTests).length > 0;
+  const [showHelp, setShowHelp] = useState(false);
 
   return (
     <div className="min-h-screen bg-bg">
@@ -43,6 +46,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowHelp(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-cyan hover:bg-cyan/10 transition-colors"
+            title="Formula Reference & Help"
+          >
+            <HelpCircle size={16} />
+            Help
+          </button>
           {hasData && (
             <span className="text-xs px-2 py-1 bg-green/10 text-green rounded-full">
               {Object.keys(uploadedTests).length} dataset(s)
@@ -51,10 +62,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       </nav>
 
-      {/* Content */}
-      <main className="max-w-[1100px] mx-auto px-6 py-6">
+      {/* Content — wider container for larger graphs */}
+      <main className="max-w-[1400px] mx-auto px-6 py-6">
         {children}
       </main>
+
+      {/* Help Dialog */}
+      {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
     </div>
   );
 }

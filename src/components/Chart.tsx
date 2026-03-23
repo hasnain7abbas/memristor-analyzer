@@ -151,13 +151,13 @@ export function AppLineChart({
         style={{
           backgroundColor: gs.backgroundColor,
           border: borderStyle,
-          borderRadius: '8px',
-          padding: '16px',
+          borderRadius: '4px',
+          padding: '20px 24px 16px 16px',
           fontFamily: gs.fontFamily,
         }}
       >
         <ResponsiveContainer width="100%" height={chartHeight}>
-          <LineChart data={data}>
+          <LineChart data={data} margin={{ top: 10, right: 20, bottom: 25, left: 15 }}>
             {gs.showGrid && (
               <CartesianGrid
                 strokeDasharray="3 3"
@@ -169,24 +169,28 @@ export function AppLineChart({
               dataKey={xKey}
               stroke={gs.axisColor}
               tick={{ fill: gs.axisColor, fontSize: gs.tickFontSize, fontFamily: gs.fontFamily }}
-              label={xLabel ? { value: xLabel, fill: gs.axisColor, dy: 15, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
+              label={xLabel ? { value: xLabel, fill: gs.axisColor, dy: 18, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
             />
             <YAxis
               stroke={gs.axisColor}
               tick={{ fill: gs.axisColor, fontSize: gs.tickFontSize, fontFamily: gs.fontFamily }}
-              label={yLabel ? { value: yLabel, fill: gs.axisColor, angle: -90, dx: -20, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
+              label={yLabel ? { value: yLabel, fill: gs.axisColor, angle: -90, dx: -25, fontSize: gs.axisFontSize, fontFamily: gs.fontFamily } : undefined}
             />
             <Tooltip
               contentStyle={{
                 backgroundColor: gs.backgroundColor,
                 border: `1px solid ${gs.gridColor}`,
-                borderRadius: '8px',
+                borderRadius: '4px',
                 fontSize: gs.tickFontSize,
                 fontFamily: gs.fontFamily,
+                padding: '8px 12px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
               }}
             />
             {gs.showLegend && (
-              <Legend wrapperStyle={{ fontSize: gs.axisFontSize, fontFamily: gs.fontFamily }} />
+              <Legend
+                wrapperStyle={{ fontSize: gs.axisFontSize, fontFamily: gs.fontFamily, paddingTop: '8px' }}
+              />
             )}
             {lines.map((line) => (
               <Line

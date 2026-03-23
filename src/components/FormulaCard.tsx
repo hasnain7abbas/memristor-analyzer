@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Tex } from './Tex';
 import type { FormulaSection } from '../types';
 
 interface FormulaCardProps {
   title: string;
   formula: string;
+  latex?: string;
   explanation: string;
   example?: string;
   highlight?: boolean;
@@ -13,7 +15,7 @@ interface FormulaCardProps {
   reference?: string;
 }
 
-export function FormulaCard({ title, formula, explanation, example, highlight, sections, physicalMeaning, reference }: FormulaCardProps) {
+export function FormulaCard({ title, formula, latex, explanation, example, highlight, sections, physicalMeaning, reference }: FormulaCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -36,9 +38,16 @@ export function FormulaCard({ title, formula, explanation, example, highlight, s
 
       {expanded && (
         <div className="px-4 pb-4 space-y-3">
-          <pre className="font-mono text-sm text-cyan bg-bg/60 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
-            {formula}
-          </pre>
+          {/* Main formula: render with KaTeX if latex is provided */}
+          {latex ? (
+            <div className="bg-bg/60 p-4 rounded-lg overflow-x-auto text-center">
+              <Tex math={latex} display />
+            </div>
+          ) : (
+            <pre className="font-mono text-sm text-cyan bg-bg/60 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
+              {formula}
+            </pre>
+          )}
           <p className="text-sm text-text-muted leading-relaxed">{explanation}</p>
 
           {sections && sections.length > 0 && (
@@ -46,9 +55,15 @@ export function FormulaCard({ title, formula, explanation, example, highlight, s
               {sections.map((sec, i) => (
                 <div key={i} className="border-l-2 border-accent/30 pl-3">
                   <p className="text-xs font-medium text-accent mb-1">{sec.subtitle}</p>
-                  <pre className="font-mono text-xs text-text-muted whitespace-pre-wrap bg-bg/40 p-2 rounded">
-                    {sec.content}
-                  </pre>
+                  {sec.latex ? (
+                    <div className="bg-bg/40 p-2 rounded overflow-x-auto text-center">
+                      <Tex math={sec.latex} display />
+                    </div>
+                  ) : (
+                    <pre className="font-mono text-xs text-text-muted whitespace-pre-wrap bg-bg/40 p-2 rounded">
+                      {sec.content}
+                    </pre>
+                  )}
                 </div>
               ))}
             </div>

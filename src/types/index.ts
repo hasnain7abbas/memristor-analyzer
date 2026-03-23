@@ -127,11 +127,13 @@ export type FrameworkType = 'pytorch' | 'crosssim' | 'neurosim' | 'memtorch';
 export interface FormulaSection {
   subtitle: string;
   content: string;
+  latex?: string;
 }
 
 export interface FormulaDefinition {
   title: string;
   formula: string;
+  latex?: string;
   explanation: string;
   example?: string;
   highlight?: boolean;

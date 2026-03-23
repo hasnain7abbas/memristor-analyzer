@@ -10,7 +10,8 @@ import type { ChartLocalSettings, FormulaDefinition } from '../types';
 const FORMULAS: FormulaDefinition[] = [
   {
     title: 'Step 1: Current → Conductance',
-    formula: 'G = I_read / V_read\n\nG (µS) = I (µA) / V (V)',
+    formula: 'G = I_read / V_read',
+    latex: 'G = \\frac{I_{\\text{read}}}{V_{\\text{read}}}',
     explanation:
       'If your Keithley records current (µA) at a fixed read voltage, divide to get conductance in µS (microsiemens).',
     example:
@@ -18,7 +19,8 @@ const FORMULAS: FormulaDefinition[] = [
     sections: [
       {
         subtitle: "Ohm's Law Derivation",
-        content: 'V = IR → I = GV → G = I/V\nwhere G = 1/R is the conductance',
+        content: 'V = IR → I = GV → G = I/V',
+        latex: 'V = IR \\;\\Rightarrow\\; I = GV \\;\\Rightarrow\\; G = \\frac{I}{V} = \\frac{1}{R}',
       },
       {
         subtitle: 'Unit Conversion Table',
@@ -34,31 +36,34 @@ const FORMULAS: FormulaDefinition[] = [
   },
   {
     title: 'Step 2: G_min, G_max, On/Off Ratio',
-    formula:
-      'G_min = min(potentiation curve)\nG_max = max(potentiation curve)\nOn/Off = G_max / G_min\nΔG = G_max - G_min',
+    formula: 'On/Off = G_max / G_min, ΔG = G_max - G_min',
+    latex: '\\text{On/Off} = \\frac{G_{\\max}}{G_{\\min}}, \\quad \\Delta G = G_{\\max} - G_{\\min}',
     explanation:
       'The conductance window between LRS and HRS. Larger windows give more analog levels for the ANN.',
     example: 'G_min = 10 µS, G_max = 100 µS\nOn/Off = 10.0, ΔG = 90 µS',
     sections: [
       {
         subtitle: 'Memory Window (dB)',
-        content: 'MW = 20·log₁₀(G_max / G_min)\n\nExample: G_max/G_min = 10 → MW = 20 dB',
+        content: 'MW = 20·log₁₀(G_max / G_min)',
+        latex: '\\text{MW} = 20 \\cdot \\log_{10}\\!\\left(\\frac{G_{\\max}}{G_{\\min}}\\right)',
       },
       {
         subtitle: 'Number of Distinguishable Levels',
-        content: 'N = ΔG / (mean_step + 2·σ_step)\n≈ 1 / (2·σ_w) for normalized noise\n\nHigher N → more bits per synapse',
+        content: 'N = ΔG / (mean_step + 2·σ_step)',
+        latex: 'N = \\frac{\\Delta G}{\\bar{\\Delta G}_{\\text{step}} + 2\\,\\sigma_{\\text{step}}}',
       },
       {
         subtitle: 'Programming Margin',
-        content: 'PM = (G_max - G_min) / (G_max + G_min) × 100%\n\nPM > 50%: good separation\nPM < 20%: poor, risk of read errors',
+        content: 'PM = (G_max - G_min) / (G_max + G_min) × 100%',
+        latex: '\\text{PM} = \\frac{G_{\\max} - G_{\\min}}{G_{\\max} + G_{\\min}} \\times 100\\%',
       },
     ],
     physicalMeaning: 'G_min corresponds to the high-resistance state (HRS, thin/ruptured filament) and G_max to the low-resistance state (LRS, thick/connected filament). The On/Off ratio determines the signal-to-noise margin for weight storage.',
   },
   {
     title: 'Step 3: Non-Linearity α — THE KEY PARAMETER',
-    formula:
-      'G(n) = G_start + (G_end - G_start) × [1 - exp(-α·n/N)] / [1 - exp(-α)]\n\nα → 0: perfectly linear\nα ≈ 1-2: mild non-linearity\nα > 4: severe (hurts ANN performance)',
+    formula: 'G(n) = G_start + (G_end - G_start) × [1 - exp(-α·n/N)] / [1 - exp(-α)]',
+    latex: 'G(n) = G_{\\text{start}} + \\bigl(G_{\\text{end}} - G_{\\text{start}}\\bigr) \\cdot \\frac{1 - e^{-\\alpha \\cdot n/N}}{1 - e^{-\\alpha}}',
     explanation:
       'α quantifies how the conductance update "saturates" as the device approaches its limit. Lower α means more uniform weight updates, which is better for training ANNs.',
     example:
@@ -67,7 +72,8 @@ const FORMULAS: FormulaDefinition[] = [
     sections: [
       {
         subtitle: 'Physical Model Derivation',
-        content: 'Kinetic equation: dG/dn = β·(G_end - G)^γ\nSolution: G(n) = G_start + (G_end-G_start)·[1-exp(-α·n/N)]/[1-exp(-α)]\n\nPhysical origin: ion drift velocity saturation\nin the filament region',
+        content: 'Kinetic equation: dG/dn = β·(G_end - G)^γ',
+        latex: '\\frac{dG}{dn} = \\beta \\cdot (G_{\\text{end}} - G)^{\\gamma}',
       },
       {
         subtitle: 'Impact on ANN Accuracy',
@@ -75,7 +81,8 @@ const FORMULAS: FormulaDefinition[] = [
       },
       {
         subtitle: 'Asymmetry Index',
-        content: 'AI = |α_P - α_D| / max(α_P, α_D)\n\nAI = 0: perfectly symmetric (ideal)\nAI > 0.5: highly asymmetric (problematic)\n\nAsymmetry causes weight drift during training',
+        content: 'AI = |α_P - α_D| / max(α_P, α_D)',
+        latex: '\\text{AI} = \\frac{|\\alpha_P - \\alpha_D|}{\\max(\\alpha_P,\\, \\alpha_D)}',
       },
     ],
     physicalMeaning: 'The non-linearity arises from the electric field distribution within the switching layer. As the filament grows (potentiation), the field concentrates at the tip causing rapid initial growth that saturates. Depression non-linearity comes from the reverse process of filament dissolution.',
@@ -83,8 +90,8 @@ const FORMULAS: FormulaDefinition[] = [
   },
   {
     title: 'Step 4: CCV & Write Noise',
-    formula:
-      'ΔG[i] = G[i+1] - G[i]\nCCV% = std(|ΔG|) / mean(|ΔG|) × 100%\nσ_w = std(ΔG) / (G_max - G_min)',
+    formula: 'CCV% = std(|ΔG|) / mean(|ΔG|) × 100%',
+    latex: '\\text{CCV}\\% = \\frac{\\sigma(|\\Delta G|)}{\\mu(|\\Delta G|)} \\times 100\\%, \\quad \\sigma_w = \\frac{\\sigma(\\Delta G)}{G_{\\max} - G_{\\min}}',
     explanation:
       'Cycle-to-cycle variation (CCV) measures how reproducible each weight update is. Write noise σ_w is the normalized standard deviation of conductance changes.',
     example:
@@ -92,52 +99,60 @@ const FORMULAS: FormulaDefinition[] = [
     sections: [
       {
         subtitle: 'Statistical Derivation',
-        content: 'CCV from binomial model of filament formation:\nP(ΔG) ~ N(µ_ΔG, σ²_ΔG)\nCCV = σ_ΔG / µ_ΔG (coefficient of variation)',
+        content: 'CCV from coefficient of variation:',
+        latex: 'P(\\Delta G) \\sim \\mathcal{N}(\\mu_{\\Delta G},\\, \\sigma^2_{\\Delta G}), \\quad \\text{CCV} = \\frac{\\sigma_{\\Delta G}}{\\mu_{\\Delta G}}',
       },
       {
         subtitle: 'Device Area Scaling',
-        content: 'σ_w ∝ 1/√A  (A = device area)\n\nSmaller devices → more noise\nTypical: 50nm device → σ_w ≈ 0.01-0.05\n         1µm device  → σ_w ≈ 0.001-0.01',
+        content: 'σ_w ∝ 1/√A  (A = device area)',
+        latex: '\\sigma_w \\propto \\frac{1}{\\sqrt{A}}',
       },
       {
         subtitle: 'Multi-Cycle Formula',
-        content: 'CCV_mc = √(CCV²_intra + CCV²_inter)\n\nCCV_intra: variation within single cycle\nCCV_inter: variation between cycles\n(requires multi-cycle data)',
+        content: 'CCV_total = √(CCV²_intra + CCV²_inter)',
+        latex: '\\text{CCV}_{\\text{total}} = \\sqrt{\\text{CCV}_{\\text{intra}}^2 + \\text{CCV}_{\\text{inter}}^2}',
       },
     ],
-    physicalMeaning: 'Write noise originates from the stochastic nature of ion migration and filament formation/dissolution. Each write pulse causes a slightly different atomic rearrangement, leading to conductance variations. The binomial nature reflects the discrete number of atoms involved in switching.',
+    physicalMeaning: 'Write noise originates from the stochastic nature of ion migration and filament formation/dissolution. Each write pulse causes a slightly different atomic rearrangement, leading to conductance variations.',
   },
   {
     title: 'Step 5: ΔG vs G Scatter Plot',
-    formula: 'For each pulse i:\n  x = G[i]\n  y = G[i+1] - G[i]\n\nPlot (x, y) for all potentiation and depression pulses.',
+    formula: 'x = G[i], y = G[i+1] - G[i]',
+    latex: 'x = G_i, \\quad y = G_{i+1} - G_i',
     explanation:
       'This scatter plot reveals the state-dependent switching behavior. Ideally, ΔG should be constant (horizontal line). A slope indicates non-linearity.',
     sections: [
       {
         subtitle: 'State-Dependent Model',
-        content: 'Potentiation: ΔG(G) = α_eff · (G_max - G)\nDepression:   ΔG(G) = -α_eff · (G - G_min)\n\nSlope of ΔG vs G = -α_eff\nIdeal (linear): slope = 0',
+        content: 'Potentiation: ΔG(G) = α_eff · (G_max - G)\nDepression: ΔG(G) = -α_eff · (G - G_min)',
+        latex: '\\Delta G_{\\text{pot}}(G) = \\alpha_{\\text{eff}} \\cdot (G_{\\max} - G), \\quad \\Delta G_{\\text{dep}}(G) = -\\alpha_{\\text{eff}} \\cdot (G - G_{\\min})',
       },
       {
         subtitle: 'Switching Uniformity Index',
-        content: 'SUI = 1 - |slope of ΔG vs G regression|\n\nSUI = 1: perfectly uniform (linear device)\nSUI < 0.5: highly non-uniform (non-linear)',
+        content: 'SUI = 1 - |slope of ΔG vs G regression|',
+        latex: '\\text{SUI} = 1 - \\bigl|\\text{slope of } \\Delta G \\text{ vs } G \\text{ regression}\\bigr|',
       },
     ],
-    physicalMeaning: 'A negative slope in ΔG vs G for potentiation means the device updates less as it approaches G_max (saturation behavior). This is the physical manifestation of non-linearity α and directly impacts weight update precision at extreme conductance states.',
+    physicalMeaning: 'A negative slope in ΔG vs G for potentiation means the device updates less as it approaches G_max (saturation behavior). This is the physical manifestation of non-linearity α.',
   },
   {
     title: 'Step 6: PPF Index',
-    formula: 'PPF Index = (A2 - A1) / A1 × 100%\n\nDouble exponential fit:\nPPF(Δt) = 1 + C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)',
+    formula: 'PPF Index = (A2 - A1) / A1 × 100%',
+    latex: '\\text{PPF} = \\frac{A_2 - A_1}{A_1} \\times 100\\%',
     explanation:
       'Paired-pulse facilitation measures short-term synaptic plasticity. τ₁ and τ₂ correspond to fast and slow decay timescales.',
     sections: [
       {
         subtitle: 'Full Double Exponential Model',
-        content: 'PPF(Δt) = 1 + C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)\n\nC₁, C₂: amplitude coefficients\nτ₁ (fast): 50-200 ms (Ca²⁺ diffusion)\nτ₂ (slow): 1-10 s (structural relaxation)',
+        content: 'PPF(Δt) = 1 + C₁·exp(-Δt/τ₁) + C₂·exp(-Δt/τ₂)',
+        latex: '\\text{PPF}(\\Delta t) = 1 + C_1 \\, e^{-\\Delta t / \\tau_1} + C_2 \\, e^{-\\Delta t / \\tau_2}',
       },
       {
         subtitle: 'Biological Comparison',
-        content: 'Hippocampal synapse:\n  τ₁ ≈ 50 ms, τ₂ ≈ 500 ms\n\nMemristor (typical):\n  τ₁ ≈ 100-500 ms, τ₂ ≈ 2-20 s\n\nCloser to biological = better for\nneuromorphic temporal processing',
+        content: 'Hippocampal synapse:\n  τ₁ ≈ 50 ms, τ₂ ≈ 500 ms\n\nMemristor (typical):\n  τ₁ ≈ 100-500 ms, τ₂ ≈ 2-20 s',
       },
     ],
-    physicalMeaning: 'PPF in memristors arises from residual ion concentration near the filament tip after the first pulse. The second pulse encounters a pre-conditioned switching layer, requiring less energy for the same conductance change. This mimics biological short-term plasticity governed by Ca²⁺ dynamics.',
+    physicalMeaning: 'PPF in memristors arises from residual ion concentration near the filament tip after the first pulse. The second pulse encounters a pre-conditioned switching layer, requiring less energy for the same conductance change.',
     reference: 'R. Zucker & W. Regehr, "Short-term synaptic plasticity," Annu. Rev. Physiol., 2002',
   },
 ];
