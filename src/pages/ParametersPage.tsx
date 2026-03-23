@@ -173,7 +173,6 @@ function autoDetectPDCycles(values: number[]): { potentiation: number[]; depress
   if (n < 10) return { potentiation: values, depression: [], detectedPulsesPerP: n, detectedPulsesPerD: 0 };
 
   // Step 1: Light smoothing for derivative computation (window=5)
-  const smoothWin = 5;
   const smoothed: number[] = [];
   for (let i = 0; i < n; i++) {
     const lo = Math.max(0, i - 2);
