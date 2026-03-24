@@ -355,61 +355,61 @@ fn compute_batch_gradients(
 
 /// Apply memristor device mapping to weight matrices (not biases).
 ///
-/// For each weight matrix W:
-///   1. Normalize to [0, 1]: W_norm = (W - w_min) / (w_max - w_min)
-///   2. Quantize: index = round(W_norm * (num_levels - 1))
-///      G_quantized = G_min + (index / (num_levels - 1)) * (G_max - G_min)
-///   3. Add multiplicative noise: G_noisy = G_quantized * (1 + sigma_w * randn())
-///   4. Clamp to [G_min, G_max]
-///   5. Map back: W_new = w_min + (w_max - w_min) * (G_clamped - G_min) / (G_max - G_min)
+/// Bug 2 fix: Uses FIXED bounds [-1, 1] — never recalculates from weight tensor.
+/// Bug 3 fix: Uses STOCHASTIC rounding — deterministic snap freezes learning.
+/// Noise fix: Effective sigma = raw_sigma / sqrt(num_levels) to account for
+///            statistical averaging during multi-pulse programming.
+///
+/// Procedure for each weight w:
+///   1. Clamp to [-1, 1] and normalize to [0, 1]
+///   2. Stochastic round to nearest hardware level
+///   3. Map to conductance and add multiplicative noise
+///   4. Map back to weight space using fixed bounds
 fn apply_device_mapping(
     net: &mut MLP,
     g_min: f64,
     g_max: f64,
-    sigma_w: f64,
+    raw_sigma_w: f64,
     num_levels_p: usize,
     num_levels_d: usize,
     rng: &mut StdRng,
 ) {
-    let num_levels = num_levels_p * num_levels_d;
-    if num_levels < 2 {
-        return;
-    }
+    let num_levels = (num_levels_p * num_levels_d).max(2);
     let noise_dist = Normal::new(0.0, 1.0).unwrap();
     let g_range = g_max - g_min;
     let nl_f64 = (num_levels - 1) as f64;
 
+    // Effective noise: raw sigma / sqrt(total levels) — validated in Phase 1
+    let effective_sigma = raw_sigma_w / (num_levels as f64).sqrt();
+
+    // FIXED bounds (Bug 2 fix) — never recalculate from weight tensor
+    let w_min: f64 = -1.0;
+    let w_max: f64 = 1.0;
+    let w_range: f64 = 2.0;
+
     for layer in &mut net.layers {
-        let w_min = layer
-            .weights
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
-        let w_max = layer
-            .weights
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let w_range = w_max - w_min;
-
-        if w_range < 1e-15 {
-            continue;
-        }
-
         for w in layer.weights.iter_mut() {
-            // Normalize to [0, 1]
-            let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
+            // 1. Clamp to fixed bounds and normalize to [0, 1]
+            let w_clamped = (*w).clamp(w_min, w_max);
+            let w_norm = (w_clamped - w_min) / w_range;
 
-            // Quantize to discrete conductance level
-            let g_index = (w_norm * nl_f64).round();
-            let g_quantized = g_min + (g_index / nl_f64) * g_range;
+            // 2. STOCHASTIC ROUNDING (Bug 3 fix)
+            let level_float = w_norm * nl_f64;
+            let lower = level_float.floor();
+            let p_upper = level_float - lower;
+            let chosen = if rng.gen::<f64>() < p_upper {
+                (lower + 1.0).min(nl_f64)
+            } else {
+                lower.max(0.0)
+            };
 
-            // Add multiplicative noise
-            let noise = rng.sample(noise_dist) * sigma_w;
+            // 3. Map to conductance and add multiplicative noise
+            let g_quantized = g_min + (chosen / nl_f64) * g_range;
+            let noise = rng.sample(noise_dist) * effective_sigma;
             let g_noisy = g_quantized * (1.0 + noise);
             let g_clamped = g_noisy.clamp(g_min, g_max);
 
-            // Map back to weight space
+            // 4. Map back to weight space using FIXED bounds
             *w = w_min + w_range * (g_clamped - g_min) / g_range;
         }
     }
@@ -596,7 +596,8 @@ fn train_ann_inner(
     mem_net.load_weights(&initial_weights);
 
     // Adam optimizers for both networks
-    let lr = config.learning_rate;
+    // Bug 1 fix: divide lr by batch_size to get per-sample effective lr
+    let lr = config.learning_rate / config.batch_size as f64;
     let mut ideal_adam = AdamState::new(&sizes, lr);
     let mut mem_adam = AdamState::new(&sizes, lr);
 

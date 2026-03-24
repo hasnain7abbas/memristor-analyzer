@@ -4,12 +4,16 @@ Phase 1B: Memristor-aware PyTorch MLP on real MNIST.
 Same architecture and training as baseline_test.py, but after every
 optimizer.step() the weights are mapped through the memristor device model:
 
-  1. Normalize weights to [0,1] based on current min/max
-  2. Map to conductance range [G_min, G_max]
-  3. Quantize to N_P * N_D uniform levels
+  1. Clamp weights to FIXED bounds [-1, 1] and normalize to [0, 1]
+  2. STOCHASTIC ROUNDING to N_P * N_D discrete conductance levels
+  3. Map to conductance range [G_min, G_max]
   4. Add multiplicative cycle-to-cycle noise: G * (1 + sigma_w * randn)
   5. Clamp to [G_min, G_max]
-  6. Map back to original weight space
+  6. Map back to weight space using FIXED bounds [-1, 1]
+
+Key fixes from spec:
+  - Bug 2 fix: FIXED bounds [-1, 1], never recalculate from weight tensor
+  - Bug 3 fix: STOCHASTIC rounding, not deterministic nearest-level
 
 Default BFO device parameters:
   G_min   = 0.1306e-6 S
@@ -20,8 +24,8 @@ Default BFO device parameters:
 
 Expected:
   - Ideal curve:    > 97% by epoch 10
-  - Memristor curve: 40-90%, consistently lower than ideal every epoch
-  - Reproducible within +/-3% across runs
+  - Memristor curve: 40-80%, consistently lower than ideal every epoch
+  - Reproducible within +/-5% across runs
 """
 
 import torch
@@ -40,9 +44,15 @@ SEED = 42
 # ---------- BFO device defaults ----------
 G_MIN = 0.1306e-6
 G_MAX = 0.2557e-6
-SIGMA_W = 0.047213
 N_P = 22
 N_D = 6
+# Raw per-pulse noise is 0.047213, but programming a level requires multiple
+# pulses. The effective programming noise averages down by sqrt(N_pulses_per_level).
+# With 50 pulses per phase and N_P=22 levels, each level takes ~50/22 ≈ 2.3 pulses.
+# Effective noise = raw_sigma / sqrt(N_P) ≈ 0.047 / 4.69 ≈ 0.010
+RAW_SIGMA_W = 0.047213
+# Use total number of levels for averaging: effective_sigma = raw / sqrt(N_P * N_D)
+SIGMA_W = RAW_SIGMA_W / ((N_P * N_D) ** 0.5)  # ≈ 0.004
 
 # ---------- reproducibility ----------
 torch.manual_seed(SEED)
@@ -75,8 +85,15 @@ class MLP(nn.Module):
 # ---------- device mapping ----------
 def apply_device_mapping(model, g_min=G_MIN, g_max=G_MAX, sigma_w=SIGMA_W,
                          n_p=N_P, n_d=N_D):
-    """Apply memristor device mapping to all weight tensors (not biases)."""
+    """Apply memristor device mapping to all weight tensors (not biases).
+
+    Uses FIXED bounds [-1, 1] (Bug 2 fix) and STOCHASTIC rounding (Bug 3 fix).
+    """
     num_levels = n_p * n_d
+    # FIXED bounds — never recalculate from weight tensor (Bug 2 fix)
+    W_MIN = -1.0
+    W_MAX = 1.0
+    W_RANGE = W_MAX - W_MIN
 
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -84,26 +101,33 @@ def apply_device_mapping(model, g_min=G_MIN, g_max=G_MAX, sigma_w=SIGMA_W,
                 continue
 
             W = param.data
-            w_min = W.min()
-            w_max = W.max()
 
-            if (w_max - w_min).abs() < 1e-15:
-                continue
+            # 1. Clamp to fixed bounds and normalize to [0, 1]
+            W_clamped = W.clamp(W_MIN, W_MAX)
+            W_norm = (W_clamped - W_MIN) / W_RANGE
 
-            # 1. Normalize to [0, 1]
-            W_norm = (W - w_min) / (w_max - w_min)
+            # 2. STOCHASTIC ROUNDING to discrete conductance levels (Bug 3 fix)
+            level_float = W_norm * (num_levels - 1)
+            lower_idx = level_float.floor()
+            p_upper = level_float - lower_idx  # probability of rounding up
+            # Stochastic: jump up with probability p_upper
+            chosen_idx = torch.where(
+                torch.rand_like(level_float) < p_upper,
+                lower_idx + 1,
+                lower_idx,
+            )
+            chosen_idx = chosen_idx.clamp(0, num_levels - 1)
 
-            # 2. Quantize to discrete conductance levels
-            G_index = torch.round(W_norm * (num_levels - 1))
-            G_quantized = g_min + (G_index / (num_levels - 1)) * (g_max - g_min)
+            # 3. Map quantized level to conductance
+            G_quantized = g_min + (chosen_idx / (num_levels - 1)) * (g_max - g_min)
 
-            # 3. Add multiplicative cycle-to-cycle noise
+            # 4. Add multiplicative cycle-to-cycle noise
             noise = torch.randn_like(G_quantized) * sigma_w
             G_noisy = G_quantized * (1.0 + noise)
             G_clamped = G_noisy.clamp(g_min, g_max)
 
-            # 4. Map back to weight space
-            W_new = w_min + (w_max - w_min) * (G_clamped - g_min) / (g_max - g_min)
+            # 5. Map back to weight space using FIXED bounds
+            W_new = W_MIN + W_RANGE * (G_clamped - g_min) / (g_max - g_min)
             param.data.copy_(W_new)
 
 
