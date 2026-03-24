@@ -90,7 +90,7 @@ export const useAppStore = create<AppState>((set) => ({
     hiddenSize: 256,
     hiddenSize2: 64,
     epochs: 50,
-    learningRate: 0.03,
+    learningRate: 0.001,
     batchSize: 32,
   },
   setANNConfig: (config) =>

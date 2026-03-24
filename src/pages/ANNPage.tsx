@@ -91,6 +91,8 @@ export function ANNPage() {
           writeNoise: extractedParams.writeNoise,
           numLevelsP: extractedParams.numLevelsP,
           numLevelsD: extractedParams.numLevelsD,
+          gMin: extractedParams.Gmin ?? 0.1,
+          gMax: extractedParams.Gmax ?? 0.3,
         },
         config: { ...annConfig, modelType: effectiveModelType },
       });
