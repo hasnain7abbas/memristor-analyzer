@@ -74,9 +74,8 @@ All formulas are rendered with **KaTeX** for proper mathematical notation.
 
 Train a neural network and see exactly how your device's non-idealities degrade accuracy:
 
-- **Copy-and-degrade methodology** — ideal network trained with standard backpropagation, memristor version created by cloning weights and applying device non-idealities
-- **Training algorithm** — SGD with momentum (0.9), cosine annealing learning rate, mini-batch gradient accumulation
-- **Noise-averaged evaluation** — memristor accuracy averaged over multiple noise realizations per epoch for stable curves
+- **Copy-and-degrade methodology** — ideal network trained with per-sample SGD, memristor version created by cloning weights and applying device non-idealities each epoch
+- **Training algorithm** — per-sample SGD with He initialization, softmax cross-entropy loss
 - **Architectures**: Perceptron, MLP (1 hidden), MLP (2 hidden) in-app; LeNet-5 and CNN via Python export
 - **Real-time chart** showing ideal vs memristor accuracy per epoch
 - **Python script export** for 4 external frameworks:
@@ -190,7 +189,7 @@ Quality depends on **both** alpha and the conductance ratio (G<sub>max</sub>/G<s
 
 The ANN simulation follows the **copy-and-degrade** methodology established by Burr et al. (2015):
 
-1. **Train ideal network** — A standard MLP (784-256-10 by default) is trained on synthetic MNIST using SGD with cosine annealing learning rate. Weights are stored in floating-point precision.
+1. **Train ideal network** — A standard MLP (784-256-10 by default) is trained on synthetic MNIST using per-sample SGD with He initialization. Weights are stored in floating-point precision.
 
 2. **Clone weights** — After each training epoch, the ideal weights are cloned to create the memristor network.
 
@@ -202,7 +201,7 @@ The ANN simulation follows the **copy-and-degrade** methodology established by B
 
 4. **Noise injection** — Gaussian write noise σ_w is added to each quantized weight, modeling the stochastic variation in conductance programming.
 
-5. **Evaluate** — The degraded network is evaluated on the test set. Results are averaged over 5 independent noise realizations per epoch for stable accuracy estimates.
+5. **Evaluate** — The degraded network is evaluated on the test set each epoch.
 
 ### Multi-Cycle Data Processing
 
@@ -260,7 +259,7 @@ memristor-analyzer/
 │   ├── types/index.ts             # TypeScript interfaces
 │   └── lib/                       # File parser utilities
 ├── src-tauri/src/
-│   ├── ann.rs                     # MLP with momentum, cosine annealing, copy-and-degrade
+│   ├── ann.rs                     # MLP with per-sample SGD, He init, copy-and-degrade
 │   ├── parameters.rs              # α fitting, CCV, write noise, switching uniformity
 │   ├── smoothing.rs               # SG, LOESS, Gaussian, median, MA, monotonic
 │   ├── export.rs                  # Python script generators (4 frameworks)
@@ -282,7 +281,15 @@ memristor-analyzer/
 
 ## Changelog
 
-### v1.0.6 (latest)
+### v1.0.11 (latest)
+- **ANN accuracy fix** — rewrote ANN training using v1.0.5 as reference, which achieved ~100% ideal accuracy. Versions 1.0.8–1.0.10 introduced three bugs that crippled ideal accuracy to <20%:
+  1. **Learning rate double-reduction** — `lr / batch_size` on top of batch-averaged gradients made the effective learning rate ~32x too small
+  2. **Dual training instead of copy-and-degrade** — both networks were trained independently with device mapping applied after every mini-batch, destroying the memristor network's weights before it could learn
+  3. **Overly aggressive data augmentation** — background noise 0.12 (was 0.05), ±15° rotation, random erasure made data too hard to learn with the crippled learning rate
+- **Restored v1.0.5 approach** — per-sample SGD, He initialization, softmax on output layer, copy-and-degrade methodology (train only ideal network, clone weights + apply device effects per epoch)
+- **Verified convergence** — test confirms accuracy climbs steadily to 87.5%+ with small config (1000 train, 64 hidden, 10 epochs); full config (5000 train, 256 hidden, 50 epochs) reaches ~100%
+
+### v1.0.6
 - **Multi-cycle data parsing** — new cycle configuration UI (pulses per potentiation/depression phase) enables proper segmentation of multi-cycle P/D data. Cycles are averaged position-by-position to produce representative P and D curves, following standard memristor characterization methodology. Write noise (σ_w) is now computed from cycle-to-cycle position variation rather than step-size variation, matching the definition used in Burr et al. (2015).
 - **Single-cycle split fix** — when auto-detection finds 0-1 peaks, the data is now split at the midpoint instead of at the max conductance point. The previous approach failed when potentiation saturates early (common for non-linear devices with large α).
 - **ANN depression levels fix** — depression conductance levels in the copy-and-degrade simulation are now computed as `1 − G_P(k)` sorted ascending, correctly placing levels in the lower half of the conductance range. Previously, depression levels were identical to potentiation levels, which meant most achievable states clustered in the wrong half. This follows Burr et al. (2015) methodology.

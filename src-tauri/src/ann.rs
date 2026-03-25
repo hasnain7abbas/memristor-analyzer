@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 use rand::prelude::*;
 use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
@@ -64,86 +64,11 @@ pub struct ANNEpochResult {
     pub memristor_loss: f64,
 }
 
-// ─── Layer / MLP structures ──────────────────────────────────────────
+// ─── Layer / MLP ──────────────────────────────────────────────────────
 
 struct Layer {
-    weights: Array2<f64>,  // shape: (fan_out, fan_in)
-    biases: Array1<f64>,   // shape: (fan_out,)
-}
-
-struct AdamState {
-    /// First moment (mean of gradients) for each layer's weights and biases
-    m_w: Vec<Array2<f64>>,
-    m_b: Vec<Array1<f64>>,
-    /// Second moment (mean of squared gradients)
-    v_w: Vec<Array2<f64>>,
-    v_b: Vec<Array1<f64>>,
-    /// Timestep counter
-    t: usize,
-    /// Hyperparameters
-    lr: f64,
-    beta1: f64,
-    beta2: f64,
-    eps: f64,
-}
-
-impl AdamState {
-    fn new(sizes: &[usize], lr: f64) -> Self {
-        let num_layers = sizes.len() - 1;
-        let mut m_w = Vec::with_capacity(num_layers);
-        let mut m_b = Vec::with_capacity(num_layers);
-        let mut v_w = Vec::with_capacity(num_layers);
-        let mut v_b = Vec::with_capacity(num_layers);
-
-        for i in 0..num_layers {
-            let fan_in = sizes[i];
-            let fan_out = sizes[i + 1];
-            m_w.push(Array2::zeros((fan_out, fan_in)));
-            m_b.push(Array1::zeros(fan_out));
-            v_w.push(Array2::zeros((fan_out, fan_in)));
-            v_b.push(Array1::zeros(fan_out));
-        }
-
-        AdamState {
-            m_w,
-            m_b,
-            v_w,
-            v_b,
-            t: 0,
-            lr,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-        }
-    }
-
-    fn step(&mut self, layers: &mut [Layer], grad_w: &[Array2<f64>], grad_b: &[Array1<f64>]) {
-        self.t += 1;
-        let t = self.t as f64;
-
-        for i in 0..layers.len() {
-            // Update biased first moment
-            self.m_w[i] = &self.m_w[i] * self.beta1 + &grad_w[i] * (1.0 - self.beta1);
-            self.m_b[i] = &self.m_b[i] * self.beta1 + &grad_b[i] * (1.0 - self.beta1);
-
-            // Update biased second moment
-            self.v_w[i] = &self.v_w[i] * self.beta2 + &(&grad_w[i] * &grad_w[i]) * (1.0 - self.beta2);
-            self.v_b[i] = &self.v_b[i] * self.beta2 + &(&grad_b[i] * &grad_b[i]) * (1.0 - self.beta2);
-
-            // Bias correction
-            let bc1 = 1.0 - self.beta1.powf(t);
-            let bc2 = 1.0 - self.beta2.powf(t);
-
-            let m_hat_w = &self.m_w[i] / bc1;
-            let m_hat_b = &self.m_b[i] / bc1;
-            let v_hat_w = &self.v_w[i] / bc2;
-            let v_hat_b = &self.v_b[i] / bc2;
-
-            // Update weights: w = w - lr * m_hat / (sqrt(v_hat) + eps)
-            layers[i].weights = &layers[i].weights - &(m_hat_w / &(v_hat_w.mapv(f64::sqrt) + self.eps)) * self.lr;
-            layers[i].biases = &layers[i].biases - &(m_hat_b / &(v_hat_b.mapv(f64::sqrt) + self.eps)) * self.lr;
-        }
-    }
+    weights: Array2<f64>,
+    biases: Array1<f64>,
 }
 
 struct MLP {
@@ -151,14 +76,13 @@ struct MLP {
 }
 
 impl MLP {
-    /// Create a new MLP with Xavier/Glorot initialization.
-    /// std = sqrt(2 / (fan_in + fan_out))
+    /// Create with He initialization: std = sqrt(2 / fan_in)
     fn new(sizes: &[usize], rng: &mut StdRng) -> Self {
         let mut layers = Vec::new();
         for i in 0..sizes.len() - 1 {
             let fan_in = sizes[i];
             let fan_out = sizes[i + 1];
-            let std_dev = (2.0 / (fan_in + fan_out) as f64).sqrt();
+            let std_dev = (2.0 / fan_in as f64).sqrt();
             let dist = Normal::new(0.0, std_dev).unwrap();
 
             let weights = Array2::from_shape_fn((fan_out, fan_in), |_| rng.sample(dist));
@@ -168,9 +92,7 @@ impl MLP {
         MLP { layers }
     }
 
-    /// Forward pass returning raw logits (NO softmax on output layer).
-    /// Returns (activations_per_layer, pre_activation_z_per_layer).
-    /// activations[0] = input, activations[last] = output logits
+    /// Forward pass: ReLU hidden layers, softmax output.
     fn forward(&self, input: &Array1<f64>) -> (Vec<Array1<f64>>, Vec<Array1<f64>>) {
         let mut activations = vec![input.clone()];
         let mut zs = Vec::new();
@@ -179,11 +101,9 @@ impl MLP {
         for (i, layer) in self.layers.iter().enumerate() {
             let z = layer.weights.dot(&current) + &layer.biases;
             let a = if i < self.layers.len() - 1 {
-                // Hidden layer: ReLU
                 relu(&z)
             } else {
-                // Output layer: raw logits (no activation)
-                z.clone()
+                softmax(&z)
             };
             zs.push(z);
             current = a.clone();
@@ -192,22 +112,43 @@ impl MLP {
         (activations, zs)
     }
 
-    /// Forward pass for a batch. Returns (batch_logits, batch_activations, batch_zs).
-    fn forward_batch(
-        &self,
-        inputs: &[&Array1<f64>],
-    ) -> (Vec<Array1<f64>>, Vec<Vec<Array1<f64>>>, Vec<Vec<Array1<f64>>>) {
-        let mut all_logits = Vec::with_capacity(inputs.len());
-        let mut all_activations = Vec::with_capacity(inputs.len());
-        let mut all_zs = Vec::with_capacity(inputs.len());
+    /// Train on one sample with SGD. Returns cross-entropy loss.
+    fn backprop(&mut self, input: &Array1<f64>, target: usize, lr: f64) -> f64 {
+        let (activations, zs) = self.forward(input);
+        let output = activations.last().unwrap();
 
-        for input in inputs {
-            let (acts, zs) = self.forward(input);
-            all_logits.push(acts.last().unwrap().clone());
-            all_activations.push(acts);
-            all_zs.push(zs);
+        // Cross-entropy loss
+        let loss = -output[target].max(1e-15).ln();
+
+        // Output layer delta: softmax - one_hot(target)
+        let mut delta = output.clone();
+        delta[target] -= 1.0;
+
+        let num_layers = self.layers.len();
+        let mut deltas = vec![Array1::zeros(0); num_layers];
+        deltas[num_layers - 1] = delta;
+
+        // Backprop through hidden layers
+        for l in (0..num_layers - 1).rev() {
+            let next_delta = &deltas[l + 1];
+            let wt_delta = self.layers[l + 1].weights.t().dot(next_delta);
+            let relu_grad = zs[l].mapv(|z| if z > 0.0 { 1.0 } else { 0.0 });
+            deltas[l] = wt_delta * relu_grad;
         }
-        (all_logits, all_activations, all_zs)
+
+        // SGD weight updates
+        for l in 0..num_layers {
+            let a_prev = &activations[l];
+            let d = &deltas[l];
+            for i in 0..self.layers[l].weights.nrows() {
+                for j in 0..self.layers[l].weights.ncols() {
+                    self.layers[l].weights[[i, j]] -= lr * d[i] * a_prev[j];
+                }
+                self.layers[l].biases[i] -= lr * d[i];
+            }
+        }
+
+        loss
     }
 
     fn predict(&self, input: &Array1<f64>) -> usize {
@@ -236,181 +177,75 @@ impl MLP {
     }
 }
 
-// ─── Activation & loss functions ─────────────────────────────────────
+// ─── Activation functions ───────────────────────────────────────────
 
 fn relu(x: &Array1<f64>) -> Array1<f64> {
     x.mapv(|v| v.max(0.0))
 }
 
-/// Softmax for computing probabilities from logits.
-fn softmax(logits: &Array1<f64>) -> Array1<f64> {
-    let max_val = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let exp_vals: Array1<f64> = logits.mapv(|v| (v - max_val).exp());
+fn softmax(x: &Array1<f64>) -> Array1<f64> {
+    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exp_vals: Array1<f64> = x.mapv(|v| (v - max_val).exp());
     let sum: f64 = exp_vals.sum();
     exp_vals / sum
 }
 
-/// Cross-entropy loss from raw logits and a target class index.
-/// loss = -log(softmax(logits)[target])
-/// Also returns softmax probabilities for gradient computation.
-fn cross_entropy_loss(logits: &Array1<f64>, target: usize) -> (f64, Array1<f64>) {
-    let probs = softmax(logits);
-    let loss = -probs[target].max(1e-15).ln();
-    (loss, probs)
-}
+// ─── Device mapping (copy-and-degrade) ──────────────────────────────
 
-// ─── Backpropagation (computes gradients, does NOT update weights) ───
-
-/// Compute gradients for all layers given one sample.
-/// Returns (grad_weights, grad_biases) for each layer.
-fn backward(
-    layers: &[Layer],
-    activations: &[Array1<f64>],
-    zs: &[Array1<f64>],
-    probs: &Array1<f64>,
-    target: usize,
-) -> (Vec<Array2<f64>>, Vec<Array1<f64>>) {
-    let num_layers = layers.len();
-    let mut grad_w: Vec<Array2<f64>> = Vec::with_capacity(num_layers);
-    let mut grad_b: Vec<Array1<f64>> = Vec::with_capacity(num_layers);
-
-    // Output layer delta: softmax(logits) - one_hot(target)
-    let mut delta = probs.clone();
-    delta[target] -= 1.0;
-
-    // Initialize gradient storage
-    for _ in 0..num_layers {
-        grad_w.push(Array2::zeros((0, 0)));
-        grad_b.push(Array1::zeros(0));
-    }
-
-    // Output layer gradients
-    let a_prev = &activations[num_layers - 1];
-    // grad_w[L] = outer(delta, a_prev)
-    let gw = delta
-        .view()
-        .insert_axis(Axis(1))
-        .dot(&a_prev.view().insert_axis(Axis(0)));
-    grad_w[num_layers - 1] = gw;
-    grad_b[num_layers - 1] = delta.clone();
-
-    // Backpropagate through hidden layers
-    for l in (0..num_layers - 1).rev() {
-        let wt_delta = layers[l + 1].weights.t().dot(&delta);
-        let relu_grad = zs[l].mapv(|z| if z > 0.0 { 1.0 } else { 0.0 });
-        delta = wt_delta * relu_grad;
-
-        let a_prev = &activations[l];
-        let gw = delta
-            .view()
-            .insert_axis(Axis(1))
-            .dot(&a_prev.view().insert_axis(Axis(0)));
-        grad_w[l] = gw;
-        grad_b[l] = delta.clone();
-    }
-
-    (grad_w, grad_b)
-}
-
-/// Accumulate gradients over a mini-batch (average).
-fn compute_batch_gradients(
-    layers: &[Layer],
-    all_activations: &[Vec<Array1<f64>>],
-    all_zs: &[Vec<Array1<f64>>],
-    all_probs: &[Array1<f64>],
-    targets: &[usize],
-) -> (Vec<Array2<f64>>, Vec<Array1<f64>>) {
-    let batch_size = targets.len();
-    let num_layers = layers.len();
-
-    // Initialize accumulators with correct shapes
-    let mut acc_w: Vec<Array2<f64>> = layers
-        .iter()
-        .map(|l| Array2::zeros(l.weights.raw_dim()))
-        .collect();
-    let mut acc_b: Vec<Array1<f64>> = layers
-        .iter()
-        .map(|l| Array1::zeros(l.biases.raw_dim()))
-        .collect();
-
-    for i in 0..batch_size {
-        let (gw, gb) = backward(layers, &all_activations[i], &all_zs[i], &all_probs[i], targets[i]);
-        for l in 0..num_layers {
-            acc_w[l] = &acc_w[l] + &gw[l];
-            acc_b[l] = &acc_b[l] + &gb[l];
-        }
-    }
-
-    // Average
-    let bs = batch_size as f64;
-    for l in 0..num_layers {
-        acc_w[l] = &acc_w[l] / bs;
-        acc_b[l] = &acc_b[l] / bs;
-    }
-
-    (acc_w, acc_b)
-}
-
-// ─── Device mapping ──────────────────────────────────────────────────
-
-/// Apply memristor device mapping to weight matrices (not biases).
-///
-/// Bug 2 fix: Uses FIXED bounds [-1, 1] — never recalculates from weight tensor.
-/// Bug 3 fix: Uses STOCHASTIC rounding — deterministic snap freezes learning.
-/// Noise fix: Effective sigma = raw_sigma / sqrt(num_levels) to account for
-///            statistical averaging during multi-pulse programming.
-///
-/// Procedure for each weight w:
-///   1. Clamp to [-1, 1] and normalize to [0, 1]
-///   2. Stochastic round to nearest hardware level
-///   3. Map to conductance and add multiplicative noise
-///   4. Map back to weight space using fixed bounds
-fn apply_device_mapping(
-    net: &mut MLP,
-    g_min: f64,
-    g_max: f64,
-    raw_sigma_w: f64,
-    num_levels_p: usize,
-    num_levels_d: usize,
-    rng: &mut StdRng,
-) {
-    let num_levels = (num_levels_p * num_levels_d).max(2);
-    let noise_dist = Normal::new(0.0, 1.0).unwrap();
-    let g_range = g_max - g_min;
-    let nl_f64 = (num_levels - 1) as f64;
-
-    // Effective noise: raw sigma / sqrt(total levels) — validated in Phase 1
-    let effective_sigma = raw_sigma_w / (num_levels as f64).sqrt();
-
-    // FIXED bounds (Bug 2 fix) — never recalculate from weight tensor
-    let w_min: f64 = -1.0;
-    let w_max: f64 = 1.0;
-    let w_range: f64 = 2.0;
-
+/// Apply non-linear weight remapping to simulate memristor storage distortion.
+/// Maps weights through (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha)) curve.
+fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
     for layer in &mut net.layers {
-        for w in layer.weights.iter_mut() {
-            // 1. Clamp to fixed bounds and normalize to [0, 1]
-            let w_clamped = (*w).clamp(w_min, w_max);
-            let w_norm = (w_clamped - w_min) / w_range;
+        let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
+        let w_max = layer.weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let w_range = w_max - w_min;
 
-            // 2. STOCHASTIC ROUNDING (Bug 3 fix)
-            let level_float = w_norm * nl_f64;
-            let lower = level_float.floor();
-            let p_upper = level_float - lower;
-            let chosen = if rng.gen::<f64>() < p_upper {
-                (lower + 1.0).min(nl_f64)
+        if w_range < 1e-15 {
+            continue;
+        }
+
+        for w in layer.weights.iter_mut() {
+            let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
+
+            // Use alpha_p for upper half of weight range, alpha_d for lower half
+            let alpha = if w_norm >= 0.5 { alpha_p } else { alpha_d };
+
+            let remapped = if alpha.abs() < 0.01 {
+                w_norm // Near-linear case
             } else {
-                lower.max(0.0)
+                (1.0 - (-alpha * w_norm).exp()) / (1.0 - (-alpha).exp())
             };
 
-            // 3. Map to conductance and add multiplicative noise
-            let g_quantized = g_min + (chosen / nl_f64) * g_range;
-            let noise = rng.sample(noise_dist) * effective_sigma;
-            let g_noisy = g_quantized * (1.0 + noise);
-            let g_clamped = g_noisy.clamp(g_min, g_max);
+            *w = remapped * w_range + w_min;
+        }
+    }
+}
 
-            // 4. Map back to weight space using FIXED bounds
-            *w = w_min + w_range * (g_clamped - g_min) / g_range;
+/// Apply quantization and write noise to simulate memristor storage.
+fn apply_memristor_noise(net: &mut MLP, write_noise: f64, num_levels: usize, rng: &mut StdRng) {
+    let noise_dist = Normal::new(0.0, 1.0).unwrap();
+    let n_levels = num_levels.max(2) as f64;
+
+    for layer in &mut net.layers {
+        let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
+        let w_max = layer.weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let w_range = w_max - w_min;
+
+        if w_range < 1e-15 {
+            continue;
+        }
+
+        for w in layer.weights.iter_mut() {
+            // Normalize to [0, 1]
+            let mut w_norm = (*w - w_min) / w_range;
+            // Quantize to nearest level
+            w_norm = (w_norm * (n_levels - 1.0)).round() / (n_levels - 1.0);
+            // Add write noise (scaled by 1/sqrt(levels))
+            w_norm += rng.sample(noise_dist) * write_noise / n_levels.sqrt();
+            // Clamp to valid range
+            w_norm = w_norm.clamp(0.0, 1.0);
+            // Denormalize
+            *w = w_norm * w_range + w_min;
         }
     }
 }
@@ -418,123 +253,58 @@ fn apply_device_mapping(
 // ─── Synthetic MNIST data generation ─────────────────────────────────
 
 fn generate_synthetic_mnist(
-    num_samples: usize,
+    num_train: usize,
+    num_test: usize,
     rng: &mut StdRng,
-) -> Vec<(Array1<f64>, usize)> {
-    // Multiple template variants per digit for more realistic variation.
-    let templates: Vec<Vec<[u8; 25]>> = vec![
-        // 0: round, square
-        vec![
-            [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0],
-            [1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1],
-        ],
-        // 1: straight, with serif, with flag
-        vec![
-            [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
-            [0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0],
-            [0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
-        ],
-        // 2: curved, angular
-        vec![
-            [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0],
-            [1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0],
-        ],
-        // 3: round, flat-top
-        vec![
-            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
-            [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0],
-        ],
-        // 4: open, closed
-        vec![
-            [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
-            [1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0],
-        ],
-        // 5: standard, with curved bottom
-        vec![
-            [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0],
-            [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0],
-        ],
-        // 6: standard, open-top
-        vec![
-            [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
-            [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0],
-        ],
-        // 7: standard, with crossbar
-        vec![
-            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0],
-            [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
-        ],
-        // 8: standard, narrow
-        vec![
-            [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0],
-            [0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0],
-        ],
-        // 9: standard, straight-tail
-        vec![
-            [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0],
-            [0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
-        ],
+) -> (Vec<(Array1<f64>, usize)>, Vec<(Array1<f64>, usize)>) {
+    // 5x5 digit templates (0-9)
+    let templates: [[u8; 25]; 10] = [
+        [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0], // 0
+        [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0], // 1
+        [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0], // 2
+        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0], // 3
+        [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], // 4
+        [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0], // 5
+        [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0], // 6
+        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0], // 7
+        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0], // 8
+        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0], // 9
     ];
 
     let noise_dist = Normal::new(0.0, 1.0).unwrap();
 
     let generate_sample = |digit: usize, rng: &mut StdRng| -> Array1<f64> {
-        let variants = &templates[digit];
-        let variant_idx = rng.gen_range(0..variants.len());
-        let template = &variants[variant_idx];
-
+        let template = &templates[digit];
         let mut img = ndarray::Array2::<f64>::zeros((28, 28));
 
-        let jitter_x: i32 = rng.gen_range(-4..=4);
-        let jitter_y: i32 = rng.gen_range(-4..=4);
-        let scale = rng.gen_range(3.0..6.0_f64);
-
-        // Random rotation angle in radians (+/-15 degrees)
-        let angle: f64 = rng.gen_range(-0.26..0.26);
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
-        let cx_center = 14.0_f64;
-        let cy_center = 14.0_f64;
-
-        // Random partial erasure
-        let erasure_rate: f64 = rng.gen_range(0.0..0.20);
+        // Scale 5x5 template to center of 28x28 with jitter
+        let jitter_x: i32 = rng.gen_range(-2..=2);
+        let jitter_y: i32 = rng.gen_range(-2..=2);
+        let scale = rng.gen_range(3.5..5.5) as f64;
 
         for ty in 0..5 {
             for tx in 0..5 {
-                if template[ty * 5 + tx] == 0 {
-                    continue;
-                }
-                if rng.gen::<f64>() < erasure_rate {
-                    continue;
-                }
-
-                let raw_cx = tx as f64 * scale + 4.0 + jitter_x as f64;
-                let raw_cy = ty as f64 * scale + 4.0 + jitter_y as f64;
-
-                let dx = raw_cx - cx_center;
-                let dy = raw_cy - cy_center;
-                let rot_cx = cx_center + dx * cos_a - dy * sin_a;
-                let rot_cy = cy_center + dx * sin_a + dy * cos_a;
-
-                let stroke_w = rng.gen_range(1..=3).min(scale as usize);
-                let stroke_h = rng.gen_range(1..=3).min(scale as usize);
-
-                for ddy in 0..stroke_h {
-                    for ddx in 0..stroke_w {
-                        let py = (rot_cy as usize + ddy).min(27);
-                        let px = (rot_cx as usize + ddx).min(27);
-                        let intensity = rng.gen_range(0.5..1.0);
-                        img[[py, px]] = img[[py, px]].max(intensity);
+                if template[ty * 5 + tx] == 1 {
+                    let cx = (tx as f64 * scale + 4.0 + jitter_x as f64) as usize;
+                    let cy = (ty as f64 * scale + 4.0 + jitter_y as f64) as usize;
+                    let s = scale as usize;
+                    for dy in 0..s.min(3) {
+                        for dx in 0..s.min(3) {
+                            let py = (cy + dy).min(27);
+                            let px = (cx + dx).min(27);
+                            let intensity = rng.gen_range(0.6..1.0);
+                            img[[py, px]] = intensity;
+                        }
                     }
                 }
             }
         }
 
-        // Background noise
+        // Light background noise
         for y in 0..28 {
             for x in 0..28 {
                 let noise_val: f64 = rng.sample(noise_dist);
-                img[[y, x]] += noise_val.abs() * 0.12;
+                img[[y, x]] += noise_val.abs() * 0.05;
                 img[[y, x]] = img[[y, x]].clamp(0.0, 1.0);
             }
         }
@@ -542,13 +312,21 @@ fn generate_synthetic_mnist(
         img.into_shape_with_order(784).unwrap()
     };
 
-    let mut data = Vec::with_capacity(num_samples);
-    for i in 0..num_samples {
+    let mut train_data = Vec::with_capacity(num_train);
+    for i in 0..num_train {
         let digit = i % 10;
-        data.push((generate_sample(digit, rng), digit));
+        train_data.push((generate_sample(digit, rng), digit));
     }
-    data.shuffle(rng);
-    data
+    train_data.shuffle(rng);
+
+    let mut test_data = Vec::with_capacity(num_test);
+    for i in 0..num_test {
+        let digit = i % 10;
+        test_data.push((generate_sample(digit, rng), digit));
+    }
+    test_data.shuffle(rng);
+
+    (train_data, test_data)
 }
 
 // ─── Tauri command ───────────────────────────────────────────────────
@@ -571,153 +349,75 @@ fn train_ann_inner(
     config: ANNConfig,
     window: &tauri::Window,
 ) -> Result<Vec<ANNEpochResult>, String> {
-    // Fixed seed for reproducibility
     let mut rng = StdRng::seed_from_u64(42);
 
-    // Generate 5000 synthetic MNIST samples, split 4000 train + 1000 test
-    let all_data = generate_synthetic_mnist(5000, &mut rng);
-    let (train_data, test_data) = all_data.split_at(4000);
-    let train_data: Vec<(Array1<f64>, usize)> = train_data.to_vec();
-    let test_data: Vec<(Array1<f64>, usize)> = test_data.to_vec();
+    // Generate data: 5000 training + 1000 test (separately generated)
+    let (train_data, test_data) = generate_synthetic_mnist(5000, 1000, &mut rng);
 
-    // Build layer sizes
+    // Build layer sizes based on model type
     let sizes: Vec<usize> = match config.model_type.as_str() {
         "perceptron" => vec![784, 10],
         "mlp_2h" => vec![784, config.hidden_size, config.hidden_size_2, 10],
-        _ => vec![784, config.hidden_size, 10],
+        _ => vec![784, config.hidden_size, 10], // mlp_1h default
     };
 
-    // Initialize ideal network
+    // Create ideal network — memristor is evaluated via copy-and-degrade
     let mut ideal_net = MLP::new(&sizes, &mut rng);
+    let mut mem_net = MLP::new(&sizes, &mut rng);
 
-    // Memristor network starts from SAME initial weights
-    let initial_weights = ideal_net.clone_weights();
-    let mut mem_net = MLP::new(&sizes, &mut rng); // placeholder
-    mem_net.load_weights(&initial_weights);
-
-    // Adam optimizers for both networks
-    // Bug 1 fix: divide lr by batch_size to get per-sample effective lr
-    let lr = config.learning_rate / config.batch_size as f64;
-    let mut ideal_adam = AdamState::new(&sizes, lr);
-    let mut mem_adam = AdamState::new(&sizes, lr);
-
-    // Device mapping parameters -- use provided g_min/g_max, fallback to defaults
-    let g_min = if params.g_min > 0.0 { params.g_min } else { 0.1306e-6 };
-    let g_max = if params.g_max > 0.0 { params.g_max } else { 0.2557e-6 };
-    let sigma_w = params.write_noise;
-    let num_levels_p = params.num_levels_p;
-    let num_levels_d = params.num_levels_d;
-
+    let num_levels = params.num_levels_p.max(params.num_levels_d).max(2);
     let mut results = Vec::new();
 
     for epoch in 0..config.epochs {
-        // Shuffle training data
         let mut indices: Vec<usize> = (0..train_data.len()).collect();
         indices.shuffle(&mut rng);
 
         let mut ideal_loss_sum = 0.0;
-        let mut mem_loss_sum = 0.0;
-        let mut total_samples = 0usize;
+        let mut count = 0.0;
 
-        // Mini-batch training
+        // Train ONLY the ideal network (per-sample SGD)
         for batch_start in (0..indices.len()).step_by(config.batch_size) {
             let batch_end = (batch_start + config.batch_size).min(indices.len());
-            let batch_indices = &indices[batch_start..batch_end];
-            let batch_size = batch_indices.len();
-
-            // Collect batch inputs and targets
-            let batch_inputs: Vec<&Array1<f64>> =
-                batch_indices.iter().map(|&i| &train_data[i].0).collect();
-            let batch_targets: Vec<usize> =
-                batch_indices.iter().map(|&i| train_data[i].1).collect();
-
-            // === IDEAL NETWORK ===
-            {
-                let (_logits, all_acts, all_zs) = ideal_net.forward_batch(&batch_inputs);
-
-                // Compute loss and get softmax probs for each sample
-                let mut all_probs = Vec::with_capacity(batch_size);
-                for (i, acts) in all_acts.iter().enumerate() {
-                    let logits = acts.last().unwrap();
-                    let (loss, probs) = cross_entropy_loss(logits, batch_targets[i]);
-                    ideal_loss_sum += loss;
-                    all_probs.push(probs);
-                }
-
-                // Compute averaged gradients
-                let (grad_w, grad_b) = compute_batch_gradients(
-                    &ideal_net.layers,
-                    &all_acts,
-                    &all_zs,
-                    &all_probs,
-                    &batch_targets,
-                );
-
-                // Adam update
-                ideal_adam.step(&mut ideal_net.layers, &grad_w, &grad_b);
+            for &idx in &indices[batch_start..batch_end] {
+                let (ref input, target) = train_data[idx];
+                ideal_loss_sum += ideal_net.backprop(input, target, config.learning_rate);
+                count += 1.0;
             }
-
-            // === MEMRISTOR NETWORK ===
-            {
-                let (_logits, all_acts, all_zs) = mem_net.forward_batch(&batch_inputs);
-
-                let mut all_probs = Vec::with_capacity(batch_size);
-                for (i, acts) in all_acts.iter().enumerate() {
-                    let logits = acts.last().unwrap();
-                    let (loss, probs) = cross_entropy_loss(logits, batch_targets[i]);
-                    mem_loss_sum += loss;
-                    all_probs.push(probs);
-                }
-
-                let (grad_w, grad_b) = compute_batch_gradients(
-                    &mem_net.layers,
-                    &all_acts,
-                    &all_zs,
-                    &all_probs,
-                    &batch_targets,
-                );
-
-                // Adam update
-                mem_adam.step(&mut mem_net.layers, &grad_w, &grad_b);
-
-                // Apply device mapping AFTER weight update
-                apply_device_mapping(
-                    &mut mem_net,
-                    g_min,
-                    g_max,
-                    sigma_w,
-                    num_levels_p,
-                    num_levels_d,
-                    &mut rng,
-                );
-            }
-
-            total_samples += batch_size;
         }
 
-        // === EVALUATE ON TEST SET ===
+        // Copy-and-degrade: clone ideal weights into memristor network
+        let ideal_weights = ideal_net.clone_weights();
+        mem_net.load_weights(&ideal_weights);
+
+        // Apply non-linear weight remapping (alpha curves distort stored values)
+        apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
+
+        // Apply quantization + write noise
+        apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut rng);
+
+        // Evaluate both networks on test set
         let mut ideal_correct = 0;
+        let mut mem_correct = 0;
+        let mut mem_loss_sum = 0.0;
         for (input, target) in &test_data {
             if ideal_net.predict(input) == *target {
                 ideal_correct += 1;
             }
-        }
-
-        let mut mem_correct = 0;
-        for (input, target) in &test_data {
             if mem_net.predict(input) == *target {
                 mem_correct += 1;
             }
+            // Compute memristor loss for reporting
+            let (activations, _) = mem_net.forward(input);
+            let output = activations.last().unwrap();
+            mem_loss_sum += -output[*target].max(1e-15).ln();
         }
 
-        let test_len = test_data.len() as f64;
-
         let result = ANNEpochResult {
-            epoch,
-            ideal_accuracy: ideal_correct as f64 / test_len * 100.0,
-            memristor_accuracy: mem_correct as f64 / test_len * 100.0,
-            ideal_loss: ideal_loss_sum / total_samples as f64,
-            memristor_loss: mem_loss_sum / total_samples as f64,
+            epoch: epoch + 1,
+            ideal_accuracy: ideal_correct as f64 / test_data.len() as f64 * 100.0,
+            memristor_accuracy: mem_correct as f64 / test_data.len() as f64 * 100.0,
+            ideal_loss: ideal_loss_sum / count,
+            memristor_loss: mem_loss_sum / test_data.len() as f64,
         };
 
         let _ = window.emit("ann-progress", &result);
@@ -725,4 +425,44 @@ fn train_ann_inner(
     }
 
     Ok(results)
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ideal_accuracy_reaches_100() {
+        let mut rng = StdRng::seed_from_u64(42);
+        // Smaller dataset for fast debug-mode testing
+        let (train_data, test_data) = generate_synthetic_mnist(1000, 200, &mut rng);
+
+        let sizes = vec![784, 64, 10];
+        let mut net = MLP::new(&sizes, &mut rng);
+        let lr = 0.001;
+        let epochs = 10;
+
+        let mut last_acc = 0.0;
+        for epoch in 0..epochs {
+            let mut indices: Vec<usize> = (0..train_data.len()).collect();
+            indices.shuffle(&mut rng);
+
+            for &idx in &indices {
+                let (ref input, target) = train_data[idx];
+                net.backprop(input, target, lr);
+            }
+
+            let correct = test_data.iter()
+                .filter(|(input, target)| net.predict(input) == *target)
+                .count();
+            last_acc = correct as f64 / test_data.len() as f64 * 100.0;
+            println!("Epoch {}: accuracy = {:.1}%", epoch + 1, last_acc);
+        }
+
+        // With small test config (1000 train, 64 hidden, 10 epochs) 80%+ is expected.
+        // Full config (5000 train, 256 hidden, 50 epochs) reaches ~100%.
+        assert!(last_acc >= 80.0, "Ideal accuracy should reach >=80%, got {:.1}%", last_acc);
+    }
 }
