@@ -385,39 +385,52 @@ fn train_ann_inner(
             }
         }
 
-        // Copy-and-degrade: clone ideal weights into memristor network
-        let ideal_weights = ideal_net.clone_weights();
-        mem_net.load_weights(&ideal_weights);
-
-        // Apply non-linear weight remapping (alpha curves distort stored values)
-        apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
-
-        // Apply quantization + write noise
-        apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut rng);
-
-        // Evaluate both networks on test set
+        // Evaluate ideal network on test set
         let mut ideal_correct = 0;
-        let mut mem_correct = 0;
-        let mut mem_loss_sum = 0.0;
         for (input, target) in &test_data {
             if ideal_net.predict(input) == *target {
                 ideal_correct += 1;
             }
-            if mem_net.predict(input) == *target {
-                mem_correct += 1;
-            }
-            // Compute memristor loss for reporting
-            let (activations, _) = mem_net.forward(input);
-            let output = activations.last().unwrap();
-            mem_loss_sum += -output[*target].max(1e-15).ln();
         }
 
+        // Copy-and-degrade: average memristor accuracy over N noise realizations
+        // (Burr et al. 2015 methodology — eliminates stochastic oscillation)
+        let n_realizations = 5;
+        let ideal_weights = ideal_net.clone_weights();
+        let mut mem_acc_sum = 0.0;
+        let mut mem_loss_sum = 0.0;
+
+        for r in 0..n_realizations {
+            mem_net.load_weights(&ideal_weights);
+
+            // Apply non-linear weight remapping (alpha curves distort stored values)
+            apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
+
+            // Apply quantization + write noise with deterministic per-epoch/realization seed
+            let noise_seed = 10000 * (epoch as u64 + 1) + r as u64;
+            let mut noise_rng = StdRng::seed_from_u64(noise_seed);
+            apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut noise_rng);
+
+            // Evaluate degraded network
+            let mut mem_correct = 0;
+            for (input, target) in &test_data {
+                if mem_net.predict(input) == *target {
+                    mem_correct += 1;
+                }
+                let (activations, _) = mem_net.forward(input);
+                let output = activations.last().unwrap();
+                mem_loss_sum += -output[*target].max(1e-15).ln();
+            }
+            mem_acc_sum += mem_correct as f64 / test_data.len() as f64 * 100.0;
+        }
+
+        let test_len = test_data.len() as f64;
         let result = ANNEpochResult {
             epoch: epoch + 1,
-            ideal_accuracy: ideal_correct as f64 / test_data.len() as f64 * 100.0,
-            memristor_accuracy: mem_correct as f64 / test_data.len() as f64 * 100.0,
+            ideal_accuracy: ideal_correct as f64 / test_len * 100.0,
+            memristor_accuracy: mem_acc_sum / n_realizations as f64,
             ideal_loss: ideal_loss_sum / count,
-            memristor_loss: mem_loss_sum / test_data.len() as f64,
+            memristor_loss: mem_loss_sum / (n_realizations as f64 * test_len),
         };
 
         let _ = window.emit("ann-progress", &result);
