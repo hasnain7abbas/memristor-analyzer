@@ -4,8 +4,6 @@ use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
-// ─── Configuration structs ────────────────────────────────────────────
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ANNConfig {
     #[serde(rename = "modelType", default = "default_model_type")]
@@ -15,7 +13,7 @@ pub struct ANNConfig {
     #[serde(rename = "hiddenSize2", default = "default_hidden_size_2")]
     pub hidden_size_2: usize,
     pub epochs: usize,
-    #[serde(rename = "learningRate", default = "default_learning_rate")]
+    #[serde(rename = "learningRate")]
     pub learning_rate: f64,
     #[serde(rename = "batchSize")]
     pub batch_size: usize,
@@ -27,10 +25,6 @@ fn default_model_type() -> String {
 
 fn default_hidden_size_2() -> usize {
     64
-}
-
-fn default_learning_rate() -> f64 {
-    0.001
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,8 +58,6 @@ pub struct ANNEpochResult {
     pub memristor_loss: f64,
 }
 
-// ─── Layer / MLP ──────────────────────────────────────────────────────
-
 struct Layer {
     weights: Array2<f64>,
     biases: Array1<f64>,
@@ -76,7 +68,6 @@ struct MLP {
 }
 
 impl MLP {
-    /// Create with He initialization: std = sqrt(2 / fan_in)
     fn new(sizes: &[usize], rng: &mut StdRng) -> Self {
         let mut layers = Vec::new();
         for i in 0..sizes.len() - 1 {
@@ -92,7 +83,6 @@ impl MLP {
         MLP { layers }
     }
 
-    /// Forward pass: ReLU hidden layers, softmax output.
     fn forward(&self, input: &Array1<f64>) -> (Vec<Array1<f64>>, Vec<Array1<f64>>) {
         let mut activations = vec![input.clone()];
         let mut zs = Vec::new();
@@ -112,15 +102,19 @@ impl MLP {
         (activations, zs)
     }
 
-    /// Train on one sample with SGD. Returns cross-entropy loss.
-    fn backprop(&mut self, input: &Array1<f64>, target: usize, lr: f64) -> f64 {
+    fn backprop(
+        &mut self,
+        input: &Array1<f64>,
+        target: usize,
+        lr: f64,
+    ) -> f64 {
         let (activations, zs) = self.forward(input);
         let output = activations.last().unwrap();
 
         // Cross-entropy loss
         let loss = -output[target].max(1e-15).ln();
 
-        // Output layer delta: softmax - one_hot(target)
+        // Output layer delta
         let mut delta = output.clone();
         delta[target] -= 1.0;
 
@@ -128,7 +122,7 @@ impl MLP {
         let mut deltas = vec![Array1::zeros(0); num_layers];
         deltas[num_layers - 1] = delta;
 
-        // Backprop through hidden layers
+        // Hidden layer deltas
         for l in (0..num_layers - 1).rev() {
             let next_delta = &deltas[l + 1];
             let wt_delta = self.layers[l + 1].weights.t().dot(next_delta);
@@ -136,7 +130,7 @@ impl MLP {
             deltas[l] = wt_delta * relu_grad;
         }
 
-        // SGD weight updates
+        // Weight updates
         for l in 0..num_layers {
             let a_prev = &activations[l];
             let d = &deltas[l];
@@ -177,21 +171,6 @@ impl MLP {
     }
 }
 
-// ─── Activation functions ───────────────────────────────────────────
-
-fn relu(x: &Array1<f64>) -> Array1<f64> {
-    x.mapv(|v| v.max(0.0))
-}
-
-fn softmax(x: &Array1<f64>) -> Array1<f64> {
-    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let exp_vals: Array1<f64> = x.mapv(|v| (v - max_val).exp());
-    let sum: f64 = exp_vals.sum();
-    exp_vals / sum
-}
-
-// ─── Device mapping (copy-and-degrade) ──────────────────────────────
-
 /// Apply non-linear weight remapping to simulate memristor storage distortion.
 /// Maps weights through (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha)) curve.
 fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
@@ -210,6 +189,7 @@ fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
             // Use alpha_p for upper half of weight range, alpha_d for lower half
             let alpha = if w_norm >= 0.5 { alpha_p } else { alpha_d };
 
+            // Non-linear remapping: (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha))
             let remapped = if alpha.abs() < 0.01 {
                 w_norm // Near-linear case
             } else {
@@ -236,13 +216,13 @@ fn apply_memristor_noise(net: &mut MLP, write_noise: f64, num_levels: usize, rng
         }
 
         for w in layer.weights.iter_mut() {
-            // Normalize to [0, 1]
+            // Normalize
             let mut w_norm = (*w - w_min) / w_range;
-            // Quantize to nearest level
+            // Quantize
             w_norm = (w_norm * (n_levels - 1.0)).round() / (n_levels - 1.0);
-            // Add write noise (scaled by 1/sqrt(levels))
+            // Add noise
             w_norm += rng.sample(noise_dist) * write_noise / n_levels.sqrt();
-            // Clamp to valid range
+            // Clamp
             w_norm = w_norm.clamp(0.0, 1.0);
             // Denormalize
             *w = w_norm * w_range + w_min;
@@ -250,7 +230,16 @@ fn apply_memristor_noise(net: &mut MLP, write_noise: f64, num_levels: usize, rng
     }
 }
 
-// ─── Synthetic MNIST data generation ─────────────────────────────────
+fn relu(x: &Array1<f64>) -> Array1<f64> {
+    x.mapv(|v| v.max(0.0))
+}
+
+fn softmax(x: &Array1<f64>) -> Array1<f64> {
+    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exp_vals: Array1<f64> = x.mapv(|v| (v - max_val).exp());
+    let sum: f64 = exp_vals.sum();
+    exp_vals / sum
+}
 
 fn generate_synthetic_mnist(
     num_train: usize,
@@ -259,23 +248,53 @@ fn generate_synthetic_mnist(
 ) -> (Vec<(Array1<f64>, usize)>, Vec<(Array1<f64>, usize)>) {
     // 5x5 digit templates (0-9)
     let templates: [[u8; 25]; 10] = [
-        [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0], // 0
-        [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0], // 1
-        [0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0], // 2
-        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0], // 3
-        [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], // 4
-        [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0], // 5
-        [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0], // 6
-        [1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0], // 7
-        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0], // 8
-        [0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0], // 9
+        // 0
+        [
+            0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0,
+        ],
+        // 1
+        [
+            0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0,
+        ],
+        // 2
+        [
+            0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0,
+        ],
+        // 3
+        [
+            1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0,
+        ],
+        // 4
+        [
+            1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        ],
+        // 5
+        [
+            1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0,
+        ],
+        // 6
+        [
+            0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0,
+        ],
+        // 7
+        [
+            1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0,
+        ],
+        // 8
+        [
+            0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0,
+        ],
+        // 9
+        [
+            0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0,
+        ],
     ];
 
     let noise_dist = Normal::new(0.0, 1.0).unwrap();
 
     let generate_sample = |digit: usize, rng: &mut StdRng| -> Array1<f64> {
         let template = &templates[digit];
-        let mut img = ndarray::Array2::<f64>::zeros((28, 28));
+        let mut img = Array2::<f64>::zeros((28, 28));
 
         // Scale 5x5 template to center of 28x28 with jitter
         let jitter_x: i32 = rng.gen_range(-2..=2);
@@ -300,7 +319,7 @@ fn generate_synthetic_mnist(
             }
         }
 
-        // Light background noise
+        // Add background noise
         for y in 0..28 {
             for x in 0..28 {
                 let noise_val: f64 = rng.sample(noise_dist);
@@ -329,17 +348,17 @@ fn generate_synthetic_mnist(
     (train_data, test_data)
 }
 
-// ─── Tauri command ───────────────────────────────────────────────────
-
 #[tauri::command]
 pub async fn train_ann(
     params: DeviceParams,
     config: ANNConfig,
     window: tauri::Window,
 ) -> Result<Vec<ANNEpochResult>, String> {
-    let result = std::thread::spawn(move || train_ann_inner(params, config, &window))
-        .join()
-        .map_err(|_| "Training thread panicked".to_string())??;
+    let result = std::thread::spawn(move || {
+        train_ann_inner(params, config, &window)
+    })
+    .join()
+    .map_err(|_| "Training thread panicked".to_string())??;
 
     Ok(result)
 }
@@ -351,22 +370,24 @@ fn train_ann_inner(
 ) -> Result<Vec<ANNEpochResult>, String> {
     let mut rng = StdRng::seed_from_u64(42);
 
-    // Generate data: 5000 training + 1000 test (separately generated)
+    // Generate data
     let (train_data, test_data) = generate_synthetic_mnist(5000, 1000, &mut rng);
 
-    // Build layer sizes based on model type
+    // Build sizes array based on model type
     let sizes: Vec<usize> = match config.model_type.as_str() {
         "perceptron" => vec![784, 10],
         "mlp_2h" => vec![784, config.hidden_size, config.hidden_size_2, 10],
         _ => vec![784, config.hidden_size, 10], // mlp_1h default
     };
 
-    // Create ideal network — memristor is evaluated via copy-and-degrade
+    // Create ideal network only — memristor is evaluated via copy-and-degrade
     let mut ideal_net = MLP::new(&sizes, &mut rng);
+
+    // Create a second MLP struct for memristor evaluation (weights will be copied each epoch)
     let mut mem_net = MLP::new(&sizes, &mut rng);
 
-    let num_levels = params.num_levels_p.max(params.num_levels_d).max(2);
     let mut results = Vec::new();
+    let num_levels = params.num_levels_p.max(params.num_levels_d).max(2);
 
     for epoch in 0..config.epochs {
         let mut indices: Vec<usize> = (0..train_data.len()).collect();
@@ -375,7 +396,7 @@ fn train_ann_inner(
         let mut ideal_loss_sum = 0.0;
         let mut count = 0.0;
 
-        // Train ONLY the ideal network (per-sample SGD)
+        // Train ONLY the ideal network
         for batch_start in (0..indices.len()).step_by(config.batch_size) {
             let batch_end = (batch_start + config.batch_size).min(indices.len());
             for &idx in &indices[batch_start..batch_end] {
@@ -385,52 +406,39 @@ fn train_ann_inner(
             }
         }
 
-        // Evaluate ideal network on test set
+        // Copy-and-degrade: clone ideal weights into memristor network
+        let ideal_weights = ideal_net.clone_weights();
+        mem_net.load_weights(&ideal_weights);
+
+        // Apply non-linear weight remapping (alpha curves distort stored values)
+        apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
+
+        // Apply quantization + write noise
+        apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut rng);
+
+        // Evaluate both networks
         let mut ideal_correct = 0;
+        let mut mem_correct = 0;
+        let mut mem_loss_sum = 0.0;
         for (input, target) in &test_data {
             if ideal_net.predict(input) == *target {
                 ideal_correct += 1;
             }
-        }
-
-        // Copy-and-degrade: average memristor accuracy over N noise realizations
-        // (Burr et al. 2015 methodology — eliminates stochastic oscillation)
-        let n_realizations = 5;
-        let ideal_weights = ideal_net.clone_weights();
-        let mut mem_acc_sum = 0.0;
-        let mut mem_loss_sum = 0.0;
-
-        for r in 0..n_realizations {
-            mem_net.load_weights(&ideal_weights);
-
-            // Apply non-linear weight remapping (alpha curves distort stored values)
-            apply_nonlinear_weight_remap(&mut mem_net, params.alpha_p, params.alpha_d);
-
-            // Apply quantization + write noise with deterministic per-epoch/realization seed
-            let noise_seed = 10000 * (epoch as u64 + 1) + r as u64;
-            let mut noise_rng = StdRng::seed_from_u64(noise_seed);
-            apply_memristor_noise(&mut mem_net, params.write_noise, num_levels, &mut noise_rng);
-
-            // Evaluate degraded network
-            let mut mem_correct = 0;
-            for (input, target) in &test_data {
-                if mem_net.predict(input) == *target {
-                    mem_correct += 1;
-                }
-                let (activations, _) = mem_net.forward(input);
-                let output = activations.last().unwrap();
-                mem_loss_sum += -output[*target].max(1e-15).ln();
+            if mem_net.predict(input) == *target {
+                mem_correct += 1;
             }
-            mem_acc_sum += mem_correct as f64 / test_data.len() as f64 * 100.0;
+            // Compute memristor loss for reporting
+            let (activations, _) = mem_net.forward(input);
+            let output = activations.last().unwrap();
+            mem_loss_sum += -output[*target].max(1e-15).ln();
         }
 
-        let test_len = test_data.len() as f64;
         let result = ANNEpochResult {
             epoch: epoch + 1,
-            ideal_accuracy: ideal_correct as f64 / test_len * 100.0,
-            memristor_accuracy: mem_acc_sum / n_realizations as f64,
+            ideal_accuracy: ideal_correct as f64 / test_data.len() as f64 * 100.0,
+            memristor_accuracy: mem_correct as f64 / test_data.len() as f64 * 100.0,
             ideal_loss: ideal_loss_sum / count,
-            memristor_loss: mem_loss_sum / (n_realizations as f64 * test_len),
+            memristor_loss: mem_loss_sum / test_data.len() as f64,
         };
 
         let _ = window.emit("ann-progress", &result);

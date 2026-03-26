@@ -58,15 +58,18 @@ All formulas are rendered with **KaTeX** for proper mathematical notation.
 | Parameter | Formula | What It Tells You |
 |-----------|---------|-------------------|
 | **Conductance** | G = I<sub>read</sub> / V<sub>read</sub> | Basic device state |
+| **G<sub>min</sub> / G<sub>max</sub>** | Mean of end-of-phase values across cycles ± σ | Stable HRS / LRS conductance |
 | **On/Off Ratio** | G<sub>max</sub> / G<sub>min</sub> | Weight storage margin |
 | **Non-linearity α** | G(n) = G<sub>start</sub> + (G<sub>end</sub> − G<sub>start</sub>) · [1 − e<sup>−αn/N</sup>] / [1 − e<sup>−α</sup>] | **The key parameter** — ANN accuracy impact |
-| **Write Noise σ<sub>w</sub>** | σ(ΔG) / (G<sub>max</sub> − G<sub>min</sub>) | Weight update reproducibility |
-| **CCV%** | σ(\|ΔG\|) / μ(\|ΔG\|) × 100% | Cycle-to-cycle variation |
+| **Per-cycle α** | Fit each cycle individually, report mean ± σ | Robust fallback when averaged-curve R² < 0 |
+| **Write Noise σ<sub>w</sub>** | σ(ΔG, ddof=1) / (G<sub>max</sub> − G<sub>min</sub>) | Weight update reproducibility |
+| **CCV%** | σ(\|ΔG\|, ddof=1) / μ(\|ΔG\|) × 100% (combined, P-only, D-only) | Cycle-to-cycle variation |
 | **Memory Window** | 20 · log₁₀(G<sub>max</sub>/G<sub>min</sub>) dB | Logarithmic On/Off measure |
 | **Programming Margin** | (G<sub>max</sub> − G<sub>min</sub>) / (G<sub>max</sub> + G<sub>min</sub>) × 100% | HRS/LRS separation quality |
-| **Asymmetry Index** | \|α<sub>P</sub> − α<sub>D</sub>\| / max(α<sub>P</sub>, α<sub>D</sub>) | P/D symmetry |
+| **Asymmetry Index** | \|α<sub>P</sub> − α<sub>D</sub>\| / max(α<sub>P</sub>, α<sub>D</sub>) | P/D symmetry (uses per-cycle α when R² < 0) |
 | **Switching Uniformity** | 1 − \|slope of ΔG vs G\| | Update uniformity (SUI) |
 | **Distinguishable Levels** | ΔG / (μ<sub>step</sub> + 2σ<sub>step</sub>) | Bits per synapse |
+| **Weight Bits** | floor(log₂(min(N<sub>P</sub>, N<sub>D</sub>))) | Effective bit-width for ANN weights |
 
 - **Interactive Help button** — opens a comprehensive formula reference with exhaustive derivations, physical meaning, acquisition guides, quality thresholds, and literature references
 
@@ -213,7 +216,7 @@ When experimental data contains multiple P/D cycles (e.g., 50 potentiation pulse
 
 3. **Write noise from cycle-to-cycle variation** — σ_w is computed from the per-position standard deviation across cycles, normalized by the conductance range: `σ_w = mean(σ[n]) / (G_max − G_min)`.
 
-4. **Parameter extraction** — α is fitted separately for the averaged P and D curves using grid search (coarse 0.01-12.0 in steps of 0.05, refined ±0.3 in steps of 0.001).
+4. **Parameter extraction** — G<sub>min</sub>/G<sub>max</sub> are computed from end-of-phase values averaged across all cycles. α is fitted separately for the averaged P and D curves using grid search (coarse 0.01–15.0 in steps of 0.05, refined ±0.3 in steps of 0.001). Per-cycle α is also computed as a robust fallback when averaged-curve R² < 0. CCV is reported separately for potentiation and depression.
 
 ---
 
@@ -281,7 +284,17 @@ memristor-analyzer/
 
 ## Changelog
 
-### v1.0.11 (latest)
+### v1.0.13 (latest)
+- **Parameter extraction rewrite** — fixed 5 cascading bugs in `parameters.rs` per verified spec:
+  1. **G<sub>min</sub>/G<sub>max</sub> fix** — now computed from end-of-phase values averaged across all cycles (was incorrectly using min/max of potentiation-only data)
+  2. **Per-cycle alpha fitting** — each P/D cycle is fitted individually, then averaged. Used as fallback when averaged-curve α produces R² < 0
+  3. **CCV from all per-cycle steps** — CCV now uses every step from every cycle (was mixing P+D from smoothed single-cycle). Reported separately for potentiation, depression, and combined
+  4. **Alpha search range** — extended to 0.01–15.0 (was 12.0) for highly non-linear devices
+  5. **Frontend sends per-cycle arrays** — `potentiationCycles`/`depressionCycles` passed to backend for correct multi-cycle analysis
+- **New extracted parameters** — G<sub>min</sub>/G<sub>max</sub> std, per-cycle α ± σ, separate CCV (P/D), weight bits (floor(log₂(min(N_P, N_D))))
+- **ANN reverted to v1.0.5** — removed the 5-realization noise averaging (introduced in v1.0.12) that was producing unreliable results. Back to the clean single copy-and-degrade per epoch
+
+### v1.0.11
 - **ANN accuracy fix** — rewrote ANN training using v1.0.5 as reference, which achieved ~100% ideal accuracy. Versions 1.0.8–1.0.10 introduced three bugs that crippled ideal accuracy to <20%:
   1. **Learning rate double-reduction** — `lr / batch_size` on top of batch-averaged gradients made the effective learning rate ~32x too small
   2. **Dual training instead of copy-and-degrade** — both networks were trained independently with device mapping applied after every mini-batch, destroying the memristor network's weights before it could learn

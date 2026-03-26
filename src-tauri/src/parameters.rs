@@ -23,6 +23,10 @@ pub struct ExtractedParams {
     pub g_min: f64,
     #[serde(rename = "Gmax")]
     pub g_max: f64,
+    #[serde(rename = "GminStd")]
+    pub g_min_std: f64,
+    #[serde(rename = "GmaxStd")]
+    pub g_max_std: f64,
     #[serde(rename = "onOffRatio")]
     pub on_off_ratio: f64,
     #[serde(rename = "dynamicRange")]
@@ -35,14 +39,28 @@ pub struct ExtractedParams {
     pub r_squared_p: f64,
     #[serde(rename = "rSquaredD")]
     pub r_squared_d: f64,
+    #[serde(rename = "alphaPPercycle", skip_serializing_if = "Option::is_none")]
+    pub alpha_p_percycle: Option<f64>,
+    #[serde(rename = "alphaDPercycle", skip_serializing_if = "Option::is_none")]
+    pub alpha_d_percycle: Option<f64>,
+    #[serde(rename = "alphaPPercycleStd", skip_serializing_if = "Option::is_none")]
+    pub alpha_p_percycle_std: Option<f64>,
+    #[serde(rename = "alphaDPercycleStd", skip_serializing_if = "Option::is_none")]
+    pub alpha_d_percycle_std: Option<f64>,
     #[serde(rename = "ccvPercent")]
     pub ccv_percent: f64,
+    #[serde(rename = "ccvPotentiation")]
+    pub ccv_potentiation: f64,
+    #[serde(rename = "ccvDepression")]
+    pub ccv_depression: f64,
     #[serde(rename = "writeNoise")]
     pub write_noise: f64,
     #[serde(rename = "numLevelsP")]
     pub num_levels_p: usize,
     #[serde(rename = "numLevelsD")]
     pub num_levels_d: usize,
+    #[serde(rename = "weightBits")]
+    pub weight_bits: usize,
     #[serde(rename = "potentiationRaw")]
     pub potentiation_raw: Vec<f64>,
     #[serde(rename = "potentiationSmoothed")]
@@ -67,6 +85,39 @@ pub struct ExtractedParams {
     pub switching_uniformity: f64,
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+/// Standard deviation with Bessel's correction (ddof=1).
+fn std_dev(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let var = values
+        .iter()
+        .map(|x| (x - mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+    var.sqrt()
+}
+
+/// CCV% from a set of step sizes: std(|steps|, ddof=1) / mean(|steps|) × 100
+fn ccv_from_steps(steps: &[f64]) -> f64 {
+    if steps.is_empty() {
+        return 0.0;
+    }
+    let abs_steps: Vec<f64> = steps.iter().map(|x| x.abs()).collect();
+    let mean_abs = abs_steps.iter().sum::<f64>() / abs_steps.len() as f64;
+    if mean_abs.abs() < 1e-15 {
+        return 0.0;
+    }
+    let s = std_dev(&abs_steps);
+    s / mean_abs * 100.0
+}
+
+// ─── Main extraction ─────────────────────────────────────────────────
+
 #[tauri::command]
 pub fn extract_parameters(
     potentiation_raw: Vec<f64>,
@@ -74,7 +125,9 @@ pub fn extract_parameters(
     smoothing_config: SmoothingConfigParam,
     v_read: f64,
     is_current: bool,
-    multi_cycle_data: Option<Vec<Vec<f64>>>,
+    _multi_cycle_data: Option<Vec<Vec<f64>>>,
+    potentiation_cycles: Option<Vec<Vec<f64>>>,
+    depression_cycles: Option<Vec<Vec<f64>>>,
 ) -> Result<ExtractedParams, String> {
     if potentiation_raw.is_empty() || depression_raw.is_empty() {
         return Err("Potentiation and depression data cannot be empty".to_string());
@@ -96,19 +149,33 @@ pub fn extract_parameters(
         depression_raw.clone()
     };
 
-    // Apply smoothing
+    // Apply smoothing to averaged curves
     let p_smoothed = apply_smoothing(&p_raw, &smoothing_config)?;
     let d_smoothed = apply_smoothing(&d_raw, &smoothing_config)?;
 
-    // Find Gmin, Gmax
-    let g_min = p_smoothed
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-    let g_max = p_smoothed
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
+    // ─── Step 3: G_min and G_max ───────────────────────────────────────
+    // G_max = mean of end-of-potentiation values across cycles
+    // G_min = mean of end-of-depression values across cycles
+    let (g_min, g_max, g_min_std, g_max_std) =
+        if let (Some(ref p_cyc), Some(ref d_cyc)) = (&potentiation_cycles, &depression_cycles) {
+            let pot_ends: Vec<f64> = p_cyc.iter().filter_map(|c| c.last().copied()).collect();
+            let dep_ends: Vec<f64> = d_cyc.iter().filter_map(|c| c.last().copied()).collect();
+
+            if pot_ends.is_empty() || dep_ends.is_empty() {
+                let gmax = *p_smoothed.last().unwrap_or(&0.0);
+                let gmin = *d_smoothed.last().unwrap_or(&0.0);
+                (gmin, gmax, 0.0, 0.0)
+            } else {
+                let gmax = pot_ends.iter().sum::<f64>() / pot_ends.len() as f64;
+                let gmin = dep_ends.iter().sum::<f64>() / dep_ends.len() as f64;
+                (gmin, gmax, std_dev(&dep_ends), std_dev(&pot_ends))
+            }
+        } else {
+            // Single cycle: use end-of-phase from smoothed curves
+            let gmax = *p_smoothed.last().unwrap_or(&0.0);
+            let gmin = *d_smoothed.last().unwrap_or(&0.0);
+            (gmin, gmax, 0.0, 0.0)
+        };
 
     let on_off_ratio = if g_min.abs() > 1e-15 {
         g_max / g_min
@@ -117,17 +184,100 @@ pub fn extract_parameters(
     };
     let dynamic_range = g_max - g_min;
 
-    // Fit alpha for potentiation
-    let (alpha_p, r_squared_p, p_fitted) = fit_alpha(&p_smoothed, g_min, g_max, true);
+    let memory_window = if g_min > 1e-15 {
+        20.0 * (g_max / g_min).log10()
+    } else {
+        0.0
+    };
 
-    // Fit alpha for depression
+    let programming_margin = if (g_max + g_min).abs() > 1e-15 {
+        (g_max - g_min) / (g_max + g_min) * 100.0
+    } else {
+        0.0
+    };
+
+    // ─── Step 4: Alpha fitting (averaged curve) ────────────────────────
+    let (alpha_p, r_squared_p, p_fitted) = fit_alpha(&p_smoothed, g_min, g_max, true);
     let (alpha_d, r_squared_d, d_fitted) = fit_alpha(&d_smoothed, g_min, g_max, false);
 
-    // Compute CCV and write noise
-    let (ccv_percent, write_noise) =
-        compute_ccv_noise(&p_smoothed, &d_smoothed, g_max - g_min, &multi_cycle_data);
+    // Per-cycle alpha fitting
+    let (alpha_p_percycle, alpha_d_percycle, alpha_p_percycle_std, alpha_d_percycle_std) =
+        if let (Some(ref p_cyc), Some(ref d_cyc)) = (&potentiation_cycles, &depression_cycles) {
+            let mut ap_vals = Vec::new();
+            for cycle in p_cyc {
+                if cycle.len() < 2 {
+                    continue;
+                }
+                let c_min = cycle.iter().cloned().fold(f64::INFINITY, f64::min);
+                let c_max = cycle.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let (a, _, _) = fit_alpha(cycle, c_min, c_max, true);
+                ap_vals.push(a);
+            }
+            let mut ad_vals = Vec::new();
+            for cycle in d_cyc {
+                if cycle.len() < 2 {
+                    continue;
+                }
+                let c_min = cycle.iter().cloned().fold(f64::INFINITY, f64::min);
+                let c_max = cycle.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let (a, _, _) = fit_alpha(cycle, c_min, c_max, false);
+                ad_vals.push(a);
+            }
 
-    // Build delta G scatter data
+            if ap_vals.is_empty() || ad_vals.is_empty() {
+                (None, None, None, None)
+            } else {
+                let ap_mean = ap_vals.iter().sum::<f64>() / ap_vals.len() as f64;
+                let ad_mean = ad_vals.iter().sum::<f64>() / ad_vals.len() as f64;
+                (
+                    Some(ap_mean),
+                    Some(ad_mean),
+                    Some(std_dev(&ap_vals)),
+                    Some(std_dev(&ad_vals)),
+                )
+            }
+        } else {
+            (None, None, None, None)
+        };
+
+    // ─── Step 5: CCV and Write Noise ───────────────────────────────────
+    let (ccv_percent, write_noise, ccv_potentiation, ccv_depression) =
+        compute_ccv_noise(
+            &p_smoothed,
+            &d_smoothed,
+            dynamic_range,
+            &potentiation_cycles,
+            &depression_cycles,
+        );
+
+    // ─── Step 6: Distinguishable Levels ────────────────────────────────
+    let num_levels_p = compute_num_levels(&p_smoothed);
+    let num_levels_d = compute_num_levels(&d_smoothed);
+    let weight_bits = {
+        let min_levels = num_levels_p.min(num_levels_d).max(1);
+        (min_levels as f64).log2().floor() as usize
+    };
+
+    // ─── Step 7: Asymmetry Index ───────────────────────────────────────
+    // Use per-cycle alpha when averaged-curve R² < 0
+    let effective_alpha_p = if r_squared_p < 0.0 {
+        alpha_p_percycle.unwrap_or(alpha_p)
+    } else {
+        alpha_p
+    };
+    let effective_alpha_d = if r_squared_d < 0.0 {
+        alpha_d_percycle.unwrap_or(alpha_d)
+    } else {
+        alpha_d
+    };
+    let asymmetry_index = if effective_alpha_p.max(effective_alpha_d) > 1e-10 {
+        (effective_alpha_p - effective_alpha_d).abs()
+            / effective_alpha_p.max(effective_alpha_d)
+    } else {
+        0.0
+    };
+
+    // ─── Step 9: Delta-G scatter data ──────────────────────────────────
     let mut delta_g = Vec::new();
     for i in 0..p_smoothed.len().saturating_sub(1) {
         delta_g.push(DeltaGPoint {
@@ -142,48 +292,31 @@ pub fn extract_parameters(
         });
     }
 
-    // Compute num_levels as distinguishable levels: ΔG / mean_step_size
-    // Rather than just data point count
-    let num_levels_p = compute_num_levels(&p_smoothed);
-    let num_levels_d = compute_num_levels(&d_smoothed);
-
-    // Memory window in dB: 20·log10(Gmax/Gmin)
-    let memory_window = if g_min > 1e-15 {
-        20.0 * (g_max / g_min).log10()
-    } else {
-        0.0
-    };
-
-    // Programming margin: (Gmax - Gmin) / (Gmax + Gmin) × 100%
-    let programming_margin = if (g_max + g_min).abs() > 1e-15 {
-        (g_max - g_min) / (g_max + g_min) * 100.0
-    } else {
-        0.0
-    };
-
-    // Asymmetry index: |αP - αD| / max(αP, αD)
-    let asymmetry_index = if alpha_p.max(alpha_d) > 1e-10 {
-        (alpha_p - alpha_d).abs() / alpha_p.max(alpha_d)
-    } else {
-        0.0
-    };
-
-    // Switching uniformity from delta_g slope
+    // ─── Step 8: Switching Uniformity ──────────────────────────────────
     let switching_uniformity = compute_switching_uniformity(&delta_g);
 
     Ok(ExtractedParams {
         g_min,
         g_max,
+        g_min_std,
+        g_max_std,
         on_off_ratio,
         dynamic_range,
         alpha_p,
         alpha_d,
         r_squared_p,
         r_squared_d,
+        alpha_p_percycle,
+        alpha_d_percycle,
+        alpha_p_percycle_std,
+        alpha_d_percycle_std,
         ccv_percent,
+        ccv_potentiation,
+        ccv_depression,
         write_noise,
         num_levels_p,
         num_levels_d,
+        weight_bits,
         potentiation_raw: p_raw,
         potentiation_smoothed: p_smoothed,
         potentiation_fitted: p_fitted,
@@ -213,6 +346,8 @@ fn apply_smoothing(data: &[f64], config: &SmoothingConfigParam) -> Result<Vec<f6
     )
 }
 
+// ─── Nonlinear model ─────────────────────────────────────────────────
+
 fn nonlinear_model(n: f64, n_total: f64, g_start: f64, g_end: f64, alpha: f64) -> f64 {
     if alpha.abs() < 1e-10 {
         // Linear case
@@ -227,6 +362,8 @@ fn nonlinear_model(n: f64, n_total: f64, g_start: f64, g_end: f64, alpha: f64) -
         }
     }
 }
+
+// ─── Alpha fitting ───────────────────────────────────────────────────
 
 fn fit_alpha(
     data: &[f64],
@@ -246,12 +383,12 @@ fn fit_alpha(
         (g_max, g_min)
     };
 
-    // Coarse grid search
+    // Coarse grid search: α from 0.01 to 15.0, step 0.05
     let mut best_alpha = 0.01f64;
     let mut best_sse = f64::INFINITY;
 
     let mut alpha = 0.01;
-    while alpha <= 12.0 {
+    while alpha <= 15.0 {
         let sse: f64 = (0..n)
             .map(|i| {
                 let pred = nonlinear_model(i as f64, n_total, g_start, g_end, alpha);
@@ -265,7 +402,7 @@ fn fit_alpha(
         alpha += 0.05;
     }
 
-    // Fine grid search
+    // Fine grid search: best_alpha ± 0.3, step 0.001
     let fine_start = (best_alpha - 0.3).max(0.001);
     let fine_end = best_alpha + 0.3;
     alpha = fine_start;
@@ -306,79 +443,66 @@ fn fit_alpha(
     (best_alpha, r_squared, fitted)
 }
 
+// ─── CCV and write noise ─────────────────────────────────────────────
+
 fn compute_ccv_noise(
-    p_data: &[f64],
-    d_data: &[f64],
+    p_smoothed: &[f64],
+    d_smoothed: &[f64],
     dynamic_range: f64,
-    multi_cycle: &Option<Vec<Vec<f64>>>,
-) -> (f64, f64) {
-    let delta_g: Vec<f64> = match multi_cycle {
-        Some(cycles) => {
-            let mut all_dg = Vec::new();
-            for cycle in cycles {
+    p_cycles: &Option<Vec<Vec<f64>>>,
+    d_cycles: &Option<Vec<Vec<f64>>>,
+) -> (f64, f64, f64, f64) {
+    // Collect ALL step sizes from per-cycle data if available
+    let (pot_steps, dep_steps) =
+        if let (Some(pc), Some(dc)) = (p_cycles, d_cycles) {
+            let mut ps = Vec::new();
+            for cycle in pc {
                 for i in 0..cycle.len().saturating_sub(1) {
-                    all_dg.push(cycle[i + 1] - cycle[i]);
+                    ps.push(cycle[i + 1] - cycle[i]);
                 }
             }
-            all_dg
-        }
-        None => {
-            let mut dg = Vec::new();
-            for i in 0..p_data.len().saturating_sub(1) {
-                dg.push(p_data[i + 1] - p_data[i]);
+            let mut ds = Vec::new();
+            for cycle in dc {
+                for i in 0..cycle.len().saturating_sub(1) {
+                    ds.push(cycle[i + 1] - cycle[i]);
+                }
             }
-            for i in 0..d_data.len().saturating_sub(1) {
-                dg.push(d_data[i + 1] - d_data[i]);
-            }
-            dg
-        }
-    };
+            (ps, ds)
+        } else {
+            // Fallback: use smoothed single-cycle data
+            let ps: Vec<f64> = p_smoothed.windows(2).map(|w| w[1] - w[0]).collect();
+            let ds: Vec<f64> = d_smoothed.windows(2).map(|w| w[1] - w[0]).collect();
+            (ps, ds)
+        };
 
-    if delta_g.is_empty() {
-        return (0.0, 0.0);
+    let all_delta_g: Vec<f64> = pot_steps
+        .iter()
+        .chain(dep_steps.iter())
+        .copied()
+        .collect();
+
+    if all_delta_g.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
     }
 
-    let abs_dg: Vec<f64> = delta_g.iter().map(|x| x.abs()).collect();
-    let n = delta_g.len() as f64;
+    // Combined CCV
+    let ccv = ccv_from_steps(&all_delta_g);
+    // Separate CCV for P and D
+    let ccv_p = ccv_from_steps(&pot_steps);
+    let ccv_d = ccv_from_steps(&dep_steps);
 
-    let mean_abs = abs_dg.iter().sum::<f64>() / n;
-    let std_abs = if delta_g.len() > 1 {
-        let variance =
-            abs_dg.iter().map(|x| (x - mean_abs).powi(2)).sum::<f64>() / (n - 1.0);
-        variance.sqrt()
-    } else {
-        0.0
-    };
-
-    let ccv = if mean_abs.abs() > 1e-15 {
-        std_abs / mean_abs * 100.0
-    } else {
-        0.0
-    };
-
-    let mean_dg = delta_g.iter().sum::<f64>() / n;
-    let std_dg = if delta_g.len() > 1 {
-        let variance = delta_g
-            .iter()
-            .map(|x| (x - mean_dg).powi(2))
-            .sum::<f64>()
-            / (n - 1.0);
-        variance.sqrt()
-    } else {
-        0.0
-    };
-
+    // Write noise: σ_w = std(all_delta_g, ddof=1) / dynamic_range
     let write_noise = if dynamic_range.abs() > 1e-15 {
-        std_dg / dynamic_range
+        std_dev(&all_delta_g) / dynamic_range
     } else {
         0.0
     };
 
-    (ccv, write_noise)
+    (ccv, write_noise, ccv_p, ccv_d)
 }
 
-/// Compute number of distinguishable conductance levels
-/// Uses the range divided by 2*sigma of step sizes
+// ─── Distinguishable levels ──────────────────────────────────────────
+
 fn compute_num_levels(data: &[f64]) -> usize {
     if data.len() < 3 {
         return data.len().max(2);
@@ -392,22 +516,15 @@ fn compute_num_levels(data: &[f64]) -> usize {
         return 2;
     }
 
-    // Compute step sizes
     let steps: Vec<f64> = data.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
     if steps.is_empty() {
         return 2;
     }
 
     let mean_step = steps.iter().sum::<f64>() / steps.len() as f64;
-    let n = steps.len() as f64;
-    let std_step = if steps.len() > 1 {
-        let var = steps.iter().map(|s| (s - mean_step).powi(2)).sum::<f64>() / (n - 1.0);
-        var.sqrt()
-    } else {
-        0.0
-    };
+    let std_step = std_dev(&steps);
 
-    // Distinguishable levels = range / (mean_step + 2*sigma) to account for noise
+    // effective_step = mean_step + 2 * sigma (2-sigma margin)
     let effective_step = mean_step + 2.0 * std_step;
     if effective_step < 1e-15 {
         return data.len().min(256).max(2);
@@ -417,8 +534,8 @@ fn compute_num_levels(data: &[f64]) -> usize {
     levels.max(2).min(256)
 }
 
-/// Compute switching uniformity index from delta_g data
-/// SUI = 1 - |slope| of linear regression of dG vs G
+// ─── Switching uniformity ────────────────────────────────────────────
+
 fn compute_switching_uniformity(delta_g: &[DeltaGPoint]) -> f64 {
     if delta_g.len() < 2 {
         return 1.0;

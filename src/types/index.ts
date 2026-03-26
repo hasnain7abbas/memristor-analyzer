@@ -37,16 +37,25 @@ export interface SmoothingConfig {
 export interface ExtractedParams {
   Gmin: number;
   Gmax: number;
+  GminStd: number;
+  GmaxStd: number;
   onOffRatio: number;
   dynamicRange: number;
   alphaP: number;
   alphaD: number;
   rSquaredP: number;
   rSquaredD: number;
+  alphaPPercycle?: number;
+  alphaDPercycle?: number;
+  alphaPPercycleStd?: number;
+  alphaDPercycleStd?: number;
   ccvPercent: number;
+  ccvPotentiation: number;
+  ccvDepression: number;
   writeNoise: number;
   numLevelsP: number;
   numLevelsD: number;
+  weightBits: number;
   potentiationRaw: number[];
   potentiationSmoothed: number[];
   potentiationFitted: number[];

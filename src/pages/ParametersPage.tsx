@@ -353,16 +353,18 @@ export function ParametersPage() {
       let pRaw: number[];
       let dRaw: number[];
       let computedWriteNoise: number | null = null;
+      let potentiationCyclesData: number[][] | null = null;
+      let depressionCyclesData: number[][] | null = null;
 
       // Helper: segment values using pulsesPerP / pulsesPerD and average across cycles.
       // Also computes write noise (sigma_w) from per-position std across cycles.
-      const segmentByCycleConfig = (vals: number[]): { p: number[]; d: number[]; sigmaW: number | null } => {
+      const segmentByCycleConfig = (vals: number[]): { p: number[]; d: number[]; sigmaW: number | null; pCycles: number[][]; dCycles: number[][] } => {
         const cycleLen = cycleConfig.pulsesPerP + cycleConfig.pulsesPerD;
         const numCycles = Math.floor(vals.length / cycleLen);
         if (numCycles < 1) {
           // Not enough data for even one cycle; split at midpoint
           const mid = Math.floor(vals.length / 2);
-          return { p: vals.slice(0, mid), d: vals.slice(mid), sigmaW: null };
+          return { p: vals.slice(0, mid), d: vals.slice(mid), sigmaW: null, pCycles: [], dCycles: [] };
         }
         const pCycles: number[][] = [];
         const dCycles: number[][] = [];
@@ -402,7 +404,7 @@ export function ParametersPage() {
             }
           }
         }
-        return { p: pAvg, d: dAvg, sigmaW };
+        return { p: pAvg, d: dAvg, sigmaW, pCycles, dCycles };
       };
 
       if (typeColName) {
@@ -417,6 +419,8 @@ export function ParametersPage() {
             pRaw = seg.p;
             dRaw = seg.d;
             computedWriteNoise = seg.sigmaW;
+            if (seg.pCycles.length > 1) potentiationCyclesData = seg.pCycles;
+            if (seg.dCycles.length > 1) depressionCyclesData = seg.dCycles;
           } else {
             const mid = Math.floor(values.length / 2);
             pRaw = values.slice(0, mid);
@@ -448,6 +452,8 @@ export function ParametersPage() {
           if (pCycles.length > 1 || dCycles.length > 1) {
             pRaw = averageAlignedSegments(pCycles);
             dRaw = averageAlignedSegments(dCycles);
+            potentiationCyclesData = pCycles;
+            depressionCyclesData = dCycles;
             // Compute sigma_w from cycle-to-cycle variation
             let sumStd = 0;
             let countPositions = 0;
@@ -483,6 +489,8 @@ export function ParametersPage() {
         pRaw = seg.p;
         dRaw = seg.d;
         computedWriteNoise = seg.sigmaW;
+        if (seg.pCycles.length > 1) potentiationCyclesData = seg.pCycles;
+        if (seg.dCycles.length > 1) depressionCyclesData = seg.dCycles;
       } else {
         // Auto-detect P/D cycles by finding local peaks and valleys.
         const detected = autoDetectPDCycles(values);
@@ -520,6 +528,8 @@ export function ParametersPage() {
         vRead,
         isCurrent: isCurrentInput && !!currentColName,
         multiCycleData,
+        potentiationCycles: potentiationCyclesData,
+        depressionCycles: depressionCyclesData,
       });
 
       // If we computed a better write noise from cycle-to-cycle variation, override
@@ -703,10 +713,19 @@ export function ParametersPage() {
               value={extractedParams.rSquaredD.toFixed(4)}
               quality={rQuality(extractedParams.rSquaredD)}
             />
+            {extractedParams.alphaPPercycle != null && (
+              <StatCard label="α_P (per-cycle)" value={`${extractedParams.alphaPPercycle.toFixed(3)} ± ${(extractedParams.alphaPPercycleStd ?? 0).toFixed(3)}`} />
+            )}
+            {extractedParams.alphaDPercycle != null && (
+              <StatCard label="α_D (per-cycle)" value={`${extractedParams.alphaDPercycle.toFixed(3)} ± ${(extractedParams.alphaDPercycleStd ?? 0).toFixed(3)}`} />
+            )}
             <StatCard label="CCV" value={extractedParams.ccvPercent.toFixed(2)} unit="%" />
+            <StatCard label="CCV (P)" value={extractedParams.ccvPotentiation.toFixed(2)} unit="%" />
+            <StatCard label="CCV (D)" value={extractedParams.ccvDepression.toFixed(2)} unit="%" />
             <StatCard label="σ_w (Write Noise)" value={extractedParams.writeNoise.toFixed(6)} />
             <StatCard label="N Levels (P)" value={String(extractedParams.numLevelsP)} />
             <StatCard label="N Levels (D)" value={String(extractedParams.numLevelsD)} />
+            <StatCard label="Weight Bits" value={String(extractedParams.weightBits)} />
             <StatCard label="Memory Window" value={extractedParams.memoryWindow.toFixed(1)} unit="dB" />
             <StatCard label="Prog. Margin" value={extractedParams.programmingMargin.toFixed(1)} unit="%" />
             <StatCard
@@ -795,19 +814,30 @@ export function ParametersPage() {
                 <button
                   onClick={() => {
                     if (!extractedParams) return;
-                    const summary = [
+                    const summary: { param: string; value: number | string }[] = [
                       { param: 'G_min (uS)', value: extractedParams.Gmin },
+                      { param: 'G_min_std (uS)', value: extractedParams.GminStd },
                       { param: 'G_max (uS)', value: extractedParams.Gmax },
+                      { param: 'G_max_std (uS)', value: extractedParams.GmaxStd },
                       { param: 'On/Off Ratio', value: extractedParams.onOffRatio },
                       { param: 'Delta_G (uS)', value: extractedParams.dynamicRange },
-                      { param: 'alpha_P', value: extractedParams.alphaP },
-                      { param: 'alpha_D', value: extractedParams.alphaD },
+                      { param: 'alpha_P (avg curve)', value: extractedParams.alphaP },
+                      { param: 'alpha_D (avg curve)', value: extractedParams.alphaD },
                       { param: 'R2_P', value: extractedParams.rSquaredP },
                       { param: 'R2_D', value: extractedParams.rSquaredD },
+                      ...(extractedParams.alphaPPercycle != null ? [
+                        { param: 'alpha_P (per-cycle)', value: `${extractedParams.alphaPPercycle.toFixed(3)} ± ${(extractedParams.alphaPPercycleStd ?? 0).toFixed(3)}` },
+                      ] : []),
+                      ...(extractedParams.alphaDPercycle != null ? [
+                        { param: 'alpha_D (per-cycle)', value: `${extractedParams.alphaDPercycle.toFixed(3)} ± ${(extractedParams.alphaDPercycleStd ?? 0).toFixed(3)}` },
+                      ] : []),
                       { param: 'CCV (%)', value: extractedParams.ccvPercent },
+                      { param: 'CCV_P (%)', value: extractedParams.ccvPotentiation },
+                      { param: 'CCV_D (%)', value: extractedParams.ccvDepression },
                       { param: 'sigma_w', value: extractedParams.writeNoise },
                       { param: 'N_levels_P', value: extractedParams.numLevelsP },
                       { param: 'N_levels_D', value: extractedParams.numLevelsD },
+                      { param: 'Weight_Bits', value: extractedParams.weightBits },
                       { param: 'Memory_Window (dB)', value: extractedParams.memoryWindow },
                       { param: 'Prog_Margin (%)', value: extractedParams.programmingMargin },
                       { param: 'Asymmetry_Index', value: extractedParams.asymmetryIndex },
