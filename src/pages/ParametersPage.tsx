@@ -64,18 +64,20 @@ const FORMULAS: FormulaDefinition[] = [
   },
   {
     title: 'Step 3: Non-Linearity α — THE KEY PARAMETER',
-    formula: 'G(n) = G_start + (G_end - G_start) × [1 - exp(-α·n/N)] / [1 - exp(-α)]',
-    latex: 'G(n) = G_{\\text{start}} + \\bigl(G_{\\text{end}} - G_{\\text{start}}\\bigr) \\cdot \\frac{1 - e^{-\\alpha \\cdot n/N}}{1 - e^{-\\alpha}}',
+    formula: 'Pot: G(n) = G_min + ΔG·[1−(1−n/N)^α_P]   Dep: G(n) = G_min + ΔG·(1−n/N)^α_D',
+    latex: '\\text{Pot:}\\; G(n) = G_{\\min} + \\Delta G \\cdot \\bigl[1 - (1 - n/N)^{\\alpha_P}\\bigr] \\quad \\text{Dep:}\\; G(n) = G_{\\min} + \\Delta G \\cdot (1 - n/N)^{\\alpha_D}',
     explanation:
-      'α quantifies how the conductance update "saturates" as the device approaches its limit. Lower α means more uniform weight updates, which is better for training ANNs.',
+      'α quantifies how the conductance update "saturates" as the device approaches its limit. ' +
+      'Lower α means more uniform weight updates, better for ANNs. ' +
+      'Fitted with free G_start/G_end endpoints using OLS + golden-section search on [0.01, 200].',
     example:
       'If α_P = 1.5 and α_D = 2.0:\nMild non-linearity. Expect ~5-15% accuracy drop vs ideal.',
     highlight: true,
     sections: [
       {
-        subtitle: 'Physical Model Derivation',
-        content: 'Kinetic equation: dG/dn = β·(G_end - G)^γ',
-        latex: '\\frac{dG}{dn} = \\beta \\cdot (G_{\\text{end}} - G)^{\\gamma}',
+        subtitle: 'Power-law model (standard in neuromorphic literature)',
+        content: 'General form: G(n) = G_start·(1−n/N)^α + G_end·[1−(1−n/N)^α]\nα→1 gives linear; α>1 abrupt saturation near G_end; α<1 abrupt near G_start',
+        latex: 'G(n) = G_{\\text{start}}\\cdot\\bigl(1 - \\tfrac{n}{N}\\bigr)^{\\alpha} + G_{\\text{end}}\\cdot\\Bigl[1 - \\bigl(1 - \\tfrac{n}{N}\\bigr)^{\\alpha}\\Bigr]',
       },
       {
         subtitle: 'Impact on ANN Accuracy',

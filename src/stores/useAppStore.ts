@@ -87,7 +87,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   annConfig: {
     modelType: 'mlp_1h',
-    hiddenSize: 256,
+    hiddenSize: 100,  // 100 neurons matches realistic crossbar array sizes
     hiddenSize2: 64,
     epochs: 50,
     learningRate: 0.001,

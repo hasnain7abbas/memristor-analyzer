@@ -73,7 +73,8 @@ impl MLP {
         for i in 0..sizes.len() - 1 {
             let fan_in = sizes[i];
             let fan_out = sizes[i + 1];
-            let std_dev = (2.0 / fan_in as f64).sqrt();
+            // Xavier/Glorot init — better for sigmoid than He init
+            let std_dev = (1.0 / fan_in as f64).sqrt();
             let dist = Normal::new(0.0, std_dev).unwrap();
 
             let weights = Array2::from_shape_fn((fan_out, fan_in), |_| rng.sample(dist));
@@ -91,7 +92,7 @@ impl MLP {
         for (i, layer) in self.layers.iter().enumerate() {
             let z = layer.weights.dot(&current) + &layer.biases;
             let a = if i < self.layers.len() - 1 {
-                relu(&z)
+                sigmoid(&z)  // Sigmoid for hidden layers (matches real crossbar arrays)
             } else {
                 softmax(&z)
             };
@@ -108,7 +109,7 @@ impl MLP {
         target: usize,
         lr: f64,
     ) -> f64 {
-        let (activations, zs) = self.forward(input);
+        let (activations, _zs) = self.forward(input);
         let output = activations.last().unwrap();
 
         // Cross-entropy loss
@@ -122,15 +123,16 @@ impl MLP {
         let mut deltas = vec![Array1::zeros(0); num_layers];
         deltas[num_layers - 1] = delta;
 
-        // Hidden layer deltas
+        // Hidden layer deltas — sigmoid gradient: σ(z)·(1−σ(z)) = a·(1−a)
         for l in (0..num_layers - 1).rev() {
             let next_delta = &deltas[l + 1];
             let wt_delta = self.layers[l + 1].weights.t().dot(next_delta);
-            let relu_grad = zs[l].mapv(|z| if z > 0.0 { 1.0 } else { 0.0 });
-            deltas[l] = wt_delta * relu_grad;
+            let sig_out = &activations[l + 1]; // sigmoid output = activation
+            let sigmoid_grad = sig_out.mapv(|a| a * (1.0 - a));
+            deltas[l] = wt_delta * sigmoid_grad;
         }
 
-        // Weight updates
+        // Weight updates (sample-by-sample outer-product, no gradient accumulation)
         for l in 0..num_layers {
             let a_prev = &activations[l];
             let d = &deltas[l];
@@ -171,8 +173,11 @@ impl MLP {
     }
 }
 
-/// Apply non-linear weight remapping to simulate memristor storage distortion.
-/// Maps weights through (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha)) curve.
+/// Apply power-law weight remapping to simulate memristor storage distortion.
+/// Uses the same power-law model as parameter extraction:
+///   remapped = 1 - (1 - w_norm)^alpha
+/// α > 1 → conductance levels cluster near the high end (abrupt saturation)
+/// α < 1 → levels cluster near the low end (sub-linear)
 fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
     for layer in &mut net.layers {
         let w_min = layer.weights.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -186,15 +191,11 @@ fn apply_nonlinear_weight_remap(net: &mut MLP, alpha_p: f64, alpha_d: f64) {
         for w in layer.weights.iter_mut() {
             let w_norm = ((*w - w_min) / w_range).clamp(0.0, 1.0);
 
-            // Use alpha_p for upper half of weight range, alpha_d for lower half
+            // Use alpha_p for upper half (potentiation), alpha_d for lower half (depression)
             let alpha = if w_norm >= 0.5 { alpha_p } else { alpha_d };
 
-            // Non-linear remapping: (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha))
-            let remapped = if alpha.abs() < 0.01 {
-                w_norm // Near-linear case
-            } else {
-                (1.0 - (-alpha * w_norm).exp()) / (1.0 - (-alpha).exp())
-            };
+            // Power-law remapping: 1 - (1 - w_norm)^alpha
+            let remapped = 1.0 - (1.0 - w_norm).powf(alpha);
 
             *w = remapped * w_range + w_min;
         }
@@ -230,8 +231,8 @@ fn apply_memristor_noise(net: &mut MLP, write_noise: f64, num_levels: usize, rng
     }
 }
 
-fn relu(x: &Array1<f64>) -> Array1<f64> {
-    x.mapv(|v| v.max(0.0))
+fn sigmoid(x: &Array1<f64>) -> Array1<f64> {
+    x.mapv(|v| 1.0 / (1.0 + (-v).exp()))
 }
 
 fn softmax(x: &Array1<f64>) -> Array1<f64> {
@@ -482,8 +483,9 @@ mod tests {
             println!("Epoch {}: accuracy = {:.1}%", epoch + 1, last_acc);
         }
 
-        // With small test config (1000 train, 64 hidden, 10 epochs) 80%+ is expected.
-        // Full config (5000 train, 256 hidden, 50 epochs) reaches ~100%.
-        assert!(last_acc >= 80.0, "Ideal accuracy should reach >=80%, got {:.1}%", last_acc);
+        // With small test config (1000 train, 64 hidden, 10 epochs) and sigmoid activation
+        // (Xavier init), 70%+ is expected. Full config (5000 train, 100 hidden, 50 epochs)
+        // reaches ~97%+.
+        assert!(last_acc >= 70.0, "Ideal accuracy should reach >=70%, got {:.1}%", last_acc);
     }
 }

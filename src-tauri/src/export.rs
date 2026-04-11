@@ -46,100 +46,107 @@ pub fn generate_python_script(
     params: ScriptParams,
     config: ScriptANNConfig,
 ) -> Result<String, String> {
-    // Build model class string based on model type
+    // Build model class string based on model type.
+    // All in-app architectures use sigmoid + no bias to match crossbar array constraints.
     let (model_class, arch_str) = match config.model_type.as_str() {
         "perceptron" => (
             r#"class MLP(nn.Module):
+    """Perceptron: 784 → 10, no hidden layer, no bias."""
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(784, 10)
-        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
-        nn.init.zeros_(self.fc1.bias)
+        self.fc1 = nn.Linear(784, 10, bias=False)
+        nn.init.xavier_uniform_(self.fc1.weight)
 
     def forward(self, x):
         x = x.view(-1, 784)
-        x = self.fc1(x)
-        return x"#.to_string(),
+        return self.fc1(x)"#.to_string(),
             "784 → 10".to_string(),
         ),
         "mlp_2h" => (
-            r#"class MLP(nn.Module):
+            format!(r#"class MLP(nn.Module):
+    """MLP 784→{h1}→{h2}→10, sigmoid hidden layers, no bias.
+    Architecture matches realistic crossbar array constraints."""
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(784, HIDDEN_SIZE)
-        self.fc2 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE_2)
-        self.fc3 = nn.Linear(HIDDEN_SIZE_2, 10)
-        self._init_weights()
-
-    def _init_weights(self):
+        self.fc1 = nn.Linear(784, {h1}, bias=False)
+        self.fc2 = nn.Linear({h1}, {h2}, bias=False)
+        self.fc3 = nn.Linear({h2}, 10, bias=False)
         for m in [self.fc1, self.fc2, self.fc3]:
-            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-            nn.init.zeros_(m.bias)
+            nn.init.xavier_uniform_(m.weight)
 
     def forward(self, x):
         x = x.view(-1, 784)
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x"#.to_string(),
+        x = torch.sigmoid(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return self.fc3(x)"#, h1 = config.hidden_size, h2 = config.hidden_size_2),
             format!("784 → {} → {} → 10", config.hidden_size, config.hidden_size_2),
         ),
         "lenet5" | "cnn_simple" => (
             r#"class LeNet5(nn.Module):
+    """LeNet-5: Conv→Pool→Conv→Pool→FC, sigmoid activations."""
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 6, 5, padding=2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16*5*5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.conv1 = nn.Conv2d(1, 6, 5, padding=2, bias=False)
+        self.conv2 = nn.Conv2d(6, 16, 5, bias=False)
+        self.fc1 = nn.Linear(16*5*5, 120, bias=False)
+        self.fc2 = nn.Linear(120, 84, bias=False)
+        self.fc3 = nn.Linear(84, 10, bias=False)
 
     def forward(self, x):
-        x = torch.relu(self.conv1(x))
-        x = torch.max_pool2d(x, 2)
-        x = torch.relu(self.conv2(x))
-        x = torch.max_pool2d(x, 2)
+        x = torch.sigmoid(self.conv1(x))
+        x = torch.avg_pool2d(x, 2)
+        x = torch.sigmoid(self.conv2(x))
+        x = torch.avg_pool2d(x, 2)
         x = x.view(-1, 16*5*5)
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        x = torch.sigmoid(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return self.fc3(x)
 
 MLP = LeNet5  # Use LeNet-5 as the model"#.to_string(),
             "LeNet-5: Conv(1,6,5)→Pool→Conv(6,16,5)→Pool→FC(400→120→84→10)".to_string(),
         ),
         _ => (
-            // mlp_1h
-            r#"class MLP(nn.Module):
+            // mlp_1h — reference architecture: 784→100→10, sigmoid, no bias
+            format!(r#"class MLP(nn.Module):
+    """MLP 784→{h}→10, sigmoid hidden layer, no bias.
+    Architecture matches realistic crossbar array constraints (100 hidden neurons).
+    Differential pair: each signed weight uses two memristors (G+, G-)."""
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(784, HIDDEN_SIZE)
-        self.fc2 = nn.Linear(HIDDEN_SIZE, 10)
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
-        nn.init.kaiming_normal_(self.fc2.weight, nonlinearity='relu')
-        nn.init.zeros_(self.fc1.bias)
-        nn.init.zeros_(self.fc2.bias)
+        self.fc1 = nn.Linear(784, {h}, bias=False)
+        self.fc2 = nn.Linear({h}, 10, bias=False)
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
 
     def forward(self, x):
         x = x.view(-1, 784)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x"#.to_string(),
+        x = torch.sigmoid(self.fc1(x))
+        return self.fc2(x)"#, h = config.hidden_size),
             format!("784 → {} → 10", config.hidden_size),
         ),
     };
 
     let script = format!(
         r#"#!/usr/bin/env python3
+# If GPU is needed, run on Google Colab: https://colab.research.google.com
+# Upload this .py file → Runtime → Change runtime type → GPU → Run all cells
 """
 Memristor Neural Analyzer — MNIST ANN Simulation Script
 Generated with device parameters from experimental data.
 This script trains on the REAL MNIST dataset (60,000 images).
 Uses copy-and-degrade approach: only ideal network is trained,
 memristor accuracy is evaluated by copying and degrading weights each epoch.
+
+Architecture: 784→{hidden_size}→10, sigmoid hidden layer, NO BIAS
+(Matches real crossbar array constraints — biases require separate digital circuits)
+
+Weight representation: Differential pair (G+, G-)
+  Each signed weight W is stored as W = G+ - G-
+  G+, G- ∈ [G_MIN, G_MAX] (both always positive conductances)
+
+Power-law model (consistent with parameter extraction):
+  Potentiation: G(n) = G_min + ΔG · [1 - (1 - n/N)^α_P]
+  Depression:   G(n) = G_min + ΔG · (1 - n/N)^α_D
 
 Requirements: pip install torch torchvision matplotlib numpy
 """
@@ -153,22 +160,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import csv
 import copy
-import os
 
 # ============================================================
-# Device Parameters (extracted from experimental data)
+# DEVICE PARAMETERS (extracted from experimental data)
 # ============================================================
 G_MIN = {g_min:.6}           # Minimum conductance (µS)
 G_MAX = {g_max:.6}           # Maximum conductance (µS)
-ALPHA_P = {alpha_p:.4}       # Potentiation non-linearity
-ALPHA_D = {alpha_d:.4}       # Depression non-linearity
+ALPHA_P = {alpha_p:.4}       # Potentiation non-linearity α_P (power-law)
+ALPHA_D = {alpha_d:.4}       # Depression non-linearity α_D (power-law)
 WRITE_NOISE = {write_noise:.6}  # Normalized write noise σ_w
-NUM_LEVELS_P = {num_levels_p}    # Potentiation conductance levels
-NUM_LEVELS_D = {num_levels_d}    # Depression conductance levels
+NUM_LEVELS_P = {num_levels_p}   # Potentiation conductance levels
+NUM_LEVELS_D = {num_levels_d}   # Depression conductance levels
 NUM_LEVELS = max(NUM_LEVELS_P, NUM_LEVELS_D)
 
 # ============================================================
-# Training Configuration
+# SIMULATION SETTINGS
 # ============================================================
 HIDDEN_SIZE = {hidden_size}
 HIDDEN_SIZE_2 = {hidden_size_2}
@@ -185,9 +191,13 @@ MOMENTUM = 0.9
 
 # ============================================================
 # Memristor Non-Ideality Functions (Copy-and-Degrade)
+# Power-law model consistent with parameter extraction.
 # ============================================================
-def apply_nonlinear_weight_remap(model):
-    """Apply non-linear weight remapping to simulate memristor storage distortion."""
+def apply_powerlaw_weight_remap(model):
+    """Apply power-law weight remapping to simulate memristor non-linearity.
+    Uses: remapped = 1 - (1 - w_norm)^alpha
+    Upper half → alpha_P (potentiation), lower half → alpha_D (depression).
+    """
     with torch.no_grad():
         for param in model.parameters():
             if param.dim() < 2:
@@ -196,23 +206,17 @@ def apply_nonlinear_weight_remap(model):
             w_min, w_max = w.min(), w.max()
             if w_max - w_min < 1e-10:
                 continue
-
             w_norm = ((w - w_min) / (w_max - w_min)).clamp(0.0, 1.0)
-
-            # Use alpha_p for upper half, alpha_d for lower half
-            alpha_map = torch.where(w_norm >= 0.5,
-                torch.tensor(ALPHA_P, device=w.device),
-                torch.tensor(ALPHA_D, device=w.device))
-
-            # Non-linear remapping: (1 - exp(-alpha * w_norm)) / (1 - exp(-alpha))
-            near_linear = alpha_map.abs() < 0.01
-            remapped = torch.where(near_linear, w_norm,
-                (1.0 - torch.exp(-alpha_map * w_norm)) / (1.0 - torch.exp(-alpha_map)))
-
+            alpha_map = torch.where(
+                w_norm >= 0.5,
+                torch.full_like(w_norm, ALPHA_P),
+                torch.full_like(w_norm, ALPHA_D),
+            )
+            remapped = 1.0 - (1.0 - w_norm).pow(alpha_map)
             param.data = remapped * (w_max - w_min) + w_min
 
 def quantize_and_add_noise(model):
-    """Quantize weights to N levels and add Gaussian write noise."""
+    """Quantize weights to N discrete levels and add Gaussian write noise."""
     with torch.no_grad():
         for param in model.parameters():
             if param.dim() < 2:
@@ -221,7 +225,6 @@ def quantize_and_add_noise(model):
             w_min, w_max = w.min(), w.max()
             if w_max - w_min < 1e-10:
                 continue
-
             w_norm = (w - w_min) / (w_max - w_min)
             w_norm = torch.round(w_norm * (NUM_LEVELS - 1)) / (NUM_LEVELS - 1)
             noise = torch.randn_like(w_norm) * WRITE_NOISE / np.sqrt(NUM_LEVELS)
@@ -236,12 +239,10 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.1307,), (0.3081,))
 ])
-
 train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-test_dataset = datasets.MNIST('./data', train=False, transform=transform)
-
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=1000)
+test_dataset  = datasets.MNIST('./data', train=False, transform=transform)
+train_loader  = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+test_loader   = DataLoader(test_dataset,  batch_size=1000)
 
 # ============================================================
 # Training (Copy-and-Degrade approach)
@@ -249,19 +250,17 @@ test_loader = DataLoader(test_dataset, batch_size=1000)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {{device}}")
 
-# Only the ideal model is trained
-ideal_model = MLP().to(device)
+ideal_model     = MLP().to(device)
 ideal_optimizer = optim.SGD(ideal_model.parameters(), lr=LEARNING_RATE, momentum=MOMENTUM)
-criterion = nn.CrossEntropyLoss()
+criterion       = nn.CrossEntropyLoss()
 
 results = []
 print(f"\nTraining for {{EPOCHS}} epochs (copy-and-degrade approach)...")
 print(f"Architecture: {arch_str}")
-print(f"Device params: αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}}")
+print(f"Device: αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}}")
 print("-" * 70)
 
 for epoch in range(1, EPOCHS + 1):
-    # Train ideal model only
     ideal_model.train()
     for data, target in train_loader:
         data, target = data.to(device), target.to(device)
@@ -271,84 +270,54 @@ for epoch in range(1, EPOCHS + 1):
         loss.backward()
         ideal_optimizer.step()
 
-    # Copy-and-degrade: clone ideal weights, then apply memristor non-idealities
+    # Copy-and-degrade: clone ideal weights, apply power-law non-idealities
     mem_model = copy.deepcopy(ideal_model)
-    apply_nonlinear_weight_remap(mem_model)
+    apply_powerlaw_weight_remap(mem_model)
     quantize_and_add_noise(mem_model)
 
-    # Evaluate both
     ideal_model.eval()
     mem_model.eval()
 
     def evaluate(model):
-        correct = 0
-        total = 0
-        total_loss = 0.0
+        correct, total, total_loss = 0, 0, 0.0
         with torch.no_grad():
             for data, target in test_loader:
                 data, target = data.to(device), target.to(device)
                 output = model(data)
                 total_loss += criterion(output, target).item() * data.size(0)
-                pred = output.argmax(dim=1)
-                correct += pred.eq(target).sum().item()
-                total += data.size(0)
+                correct    += output.argmax(dim=1).eq(target).sum().item()
+                total      += data.size(0)
         return correct / total * 100, total_loss / total
 
     ideal_acc, ideal_loss = evaluate(ideal_model)
-    mem_acc, mem_loss = evaluate(mem_model)
-
-    results.append({{
-        'epoch': epoch,
-        'ideal_acc': ideal_acc,
-        'mem_acc': mem_acc,
-        'ideal_loss': ideal_loss,
-        'mem_loss': mem_loss,
-    }})
-
-    print(f"Epoch {{epoch:3d}}/{{EPOCHS}} | "
-          f"Ideal: {{ideal_acc:.2f}}% (loss={{ideal_loss:.4f}}) | "
-          f"Memristor: {{mem_acc:.2f}}% (loss={{mem_loss:.4f}})")
+    mem_acc,   mem_loss   = evaluate(mem_model)
+    results.append(dict(epoch=epoch, ideal_acc=ideal_acc, mem_acc=mem_acc,
+                        ideal_loss=ideal_loss, mem_loss=mem_loss))
+    print(f"Epoch {{epoch:3d}}/{{EPOCHS}} | Ideal: {{ideal_acc:.2f}}% | Memristor: {{mem_acc:.2f}}%")
 
 # ============================================================
 # Results
 # ============================================================
 best_ideal = max(r['ideal_acc'] for r in results)
-best_mem = max(r['mem_acc'] for r in results)
-drop = best_ideal - best_mem
+best_mem   = max(r['mem_acc']   for r in results)
+print(f"\nBest Ideal: {{best_ideal:.2f}}%  |  Best Memristor: {{best_mem:.2f}}%  |  Drop: {{best_ideal-best_mem:.2f}}%")
 
-print("\n" + "=" * 70)
-print(f"Best Ideal Accuracy:     {{best_ideal:.2f}}%")
-print(f"Best Memristor Accuracy: {{best_mem:.2f}}%")
-print(f"Accuracy Drop:           {{drop:.2f}}%")
-print("=" * 70)
-
-# Save CSV
 with open('training_results.csv', 'w', newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=['epoch', 'ideal_acc', 'mem_acc', 'ideal_loss', 'mem_loss'])
-    writer.writeheader()
-    writer.writerows(results)
+    writer = csv.DictWriter(f, fieldnames=['epoch','ideal_acc','mem_acc','ideal_loss','mem_loss'])
+    writer.writeheader(); writer.writerows(results)
 print("Saved: training_results.csv")
-
-# Plot
-plt.rcParams['font.family'] = 'Times New Roman'
-plt.rcParams['font.size'] = 12
 
 fig, ax = plt.subplots(figsize=(8, 5))
 epochs_list = [r['epoch'] for r in results]
-ax.plot(epochs_list, [r['ideal_acc'] for r in results], 'b-o', markersize=3, label='Ideal', linewidth=2)
-ax.plot(epochs_list, [r['mem_acc'] for r in results], 'r-s', markersize=3, label='Memristor', linewidth=2)
-ax.set_xlabel('Epoch')
-ax.set_ylabel('Test Accuracy (%)')
-ax.set_title(f'MNIST Classification: Ideal vs Memristor (Copy-and-Degrade)\n'
-             f'(αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}})')
-ax.legend()
-ax.grid(True, alpha=0.3)
-ax.set_ylim([0, 100])
-
+ax.plot(epochs_list, [r['ideal_acc'] for r in results], 'b-o', ms=3, label='Ideal', lw=2)
+ax.plot(epochs_list, [r['mem_acc']   for r in results], 'r-s', ms=3, label='Memristor', lw=2)
+ax.set(xlabel='Epoch', ylabel='Test Accuracy (%)',
+       title=f'MNIST: Ideal vs Memristor (αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σw={{WRITE_NOISE:.4f}})',
+       ylim=[0, 100])
+ax.legend(); ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig('mnist_accuracy.png', dpi=300, bbox_inches='tight')
-plt.savefig('mnist_accuracy.pdf', bbox_inches='tight')
-print("Saved: mnist_accuracy.png, mnist_accuracy.pdf")
+print("Saved: mnist_accuracy.png")
 plt.show()
 "#,
         g_min = params.g_min,
@@ -375,96 +344,126 @@ plt.show()
 pub fn generate_crosssim_script(params: ScriptParams) -> Result<String, String> {
     let script = format!(
         r#"#!/usr/bin/env python3
+# Run this notebook in Google Colab for GPU access: upload this .py file or convert to .ipynb
+# https://colab.research.google.com — Runtime → Change runtime type → GPU → Run all cells
 """
 Memristor Neural Analyzer — CrossSim Crossbar Simulation Script
 Generated with device parameters from experimental data.
 
-CrossSim is developed by Sandia National Laboratories for simulating
-analog crossbar arrays with realistic device models.
+CrossSim (Sandia National Laboratories) simulates analog crossbar arrays with
+realistic device and circuit-level non-idealities.
+
+Architecture: 784 → 100 → 10, sigmoid, NO BIAS
+(Matches real crossbar constraints; 100 hidden neurons = practical array size)
+
+Power-law model (consistent with parameter extraction):
+  Potentiation LUT: G(k) = G_MIN + ΔG · [1 - (1 - k/N)^α_P]
+  Depression   LUT: G(k) = G_MIN + ΔG · (1 - k/N)^α_D
 
 Requirements:
-  pip install cross-sim
-  See: https://github.com/sandialabs/cross-sim
+  git clone https://github.com/sandialabs/cross-sim.git
+  cd cross-sim && pip install -e .
 
-This script configures a crossbar array with your extracted device
-parameters and runs MNIST classification.
+USE_GPU = False  # Set True only in Google Colab with GPU runtime
 """
 
 import numpy as np
 
+# ============================================================
+# DEVICE PARAMETERS (from experimental extraction)
+# ============================================================
+G_MIN = {g_min:.6}e-6       # Min conductance (S)  [converted from µS]
+G_MAX = {g_max:.6}e-6       # Max conductance (S)
+ALPHA_P = {alpha_p:.4}        # Potentiation non-linearity α_P (power-law)
+ALPHA_D = {alpha_d:.4}        # Depression non-linearity α_D (power-law)
+WRITE_NOISE = {write_noise:.6}   # Normalized write noise σ_w
+NUM_LEVELS_P = {num_levels_p}    # Potentiation levels
+NUM_LEVELS_D = {num_levels_d}    # Depression levels
+NUM_LEVELS = max(NUM_LEVELS_P, NUM_LEVELS_D)
+
+# ============================================================
+# SIMULATION SETTINGS
+# ============================================================
+HIDDEN_UNITS = 100     # Hidden layer size (matches in-app simulation)
+EPOCHS = 50
+LEARNING_RATE = 1e-3
+USE_GPU = False        # True → Google Colab GPU
+
+# ============================================================
+# Power-law LUT generation (matching parameter extraction)
+# ============================================================
+def make_powerlaw_lut(n_levels, alpha, g_min, g_max):
+    """Generate conductance lookup table using power-law model."""
+    dg = g_max - g_min
+    k = np.arange(n_levels)
+    # Potentiation curve: G(k) = G_min + ΔG · [1 - (1 - k/(N-1))^α]
+    lut = g_min + dg * (1.0 - (1.0 - k / (n_levels - 1)) ** alpha)
+    return lut
+
+lut_ltp = make_powerlaw_lut(NUM_LEVELS, ALPHA_P, G_MIN, G_MAX)
+lut_ltd = make_powerlaw_lut(NUM_LEVELS, ALPHA_D, G_MIN, G_MAX)[::-1]  # reversed for depression
+
+print("Power-law LUT generated:")
+print(f"  LTP: {{lut_ltp[0]*1e6:.3f}} µS → {{lut_ltp[-1]*1e6:.3f}} µS  ({{NUM_LEVELS}} levels)")
+print(f"  LTD: {{lut_ltd[0]*1e6:.3f}} µS → {{lut_ltd[-1]*1e6:.3f}} µS  ({{NUM_LEVELS}} levels)")
+
+# ============================================================
+# CrossSim Setup
+# ============================================================
 try:
     from simulator import CrossSimParameters
     from simulator.cores import AnalogCore
     from simulator.algorithms import DNN
 except ImportError:
-    print("CrossSim not found. Install from: https://github.com/sandialabs/cross-sim")
-    print("  git clone https://github.com/sandialabs/cross-sim.git")
-    print("  cd cross-sim && pip install -e .")
+    print("\nCrossSim not found. Install from: https://github.com/sandialabs/cross-sim")
+    print("  git clone https://github.com/sandialabs/cross-sim.git && cd cross-sim && pip install -e .")
     exit(1)
 
-# ============================================================
-# Device Parameters (from experimental extraction)
-# ============================================================
-G_MIN = {g_min:.6}e-6      # Min conductance (S) — converted from µS
-G_MAX = {g_max:.6}e-6      # Max conductance (S) — converted from µS
-ALPHA_P = {alpha_p:.4}       # Potentiation non-linearity
-ALPHA_D = {alpha_d:.4}       # Depression non-linearity
-WRITE_NOISE = {write_noise:.6}  # Normalized write noise σ_w
-NUM_LEVELS = max({num_levels_p}, {num_levels_d})
+cs_params = CrossSimParameters()
 
-# ============================================================
-# CrossSim Configuration
-# ============================================================
-params = CrossSimParameters()
+# Balanced crossbar: each signed weight = G+ - G- (differential pair)
+cs_params.core.style = "BALANCED"
+cs_params.core.rows = 784           # Input size
+cs_params.core.cols = HIDDEN_UNITS  # Hidden layer (first crossbar array)
 
-# Core configuration
-params.core.style = "BALANCED"          # Balanced crossbar for +/- weights
-params.core.rows = 784                  # MNIST input size
-params.core.cols = 10                   # Output classes
+# Conductance range
+cs_params.core.mapping.weights.minimum = G_MIN
+cs_params.core.mapping.weights.maximum = G_MAX
 
-# Device model
-params.core.mapping.weights.minimum = G_MIN
-params.core.mapping.weights.maximum = G_MAX
-
-# Programming non-linearity
-params.core.device.programming.Gmin_LTP = G_MIN
-params.core.device.programming.Gmax_LTP = G_MAX
-params.core.device.programming.alpha_LTP = ALPHA_P  # Potentiation NL
-params.core.device.programming.alpha_LTD = ALPHA_D  # Depression NL
+# Power-law non-linearity
+cs_params.core.device.programming.Gmin_LTP = G_MIN
+cs_params.core.device.programming.Gmax_LTP = G_MAX
+cs_params.core.device.programming.alpha_LTP = ALPHA_P
+cs_params.core.device.programming.alpha_LTD = ALPHA_D
 
 # Write noise
-params.core.device.programming.write_noise.sigma = WRITE_NOISE * (G_MAX - G_MIN)
-params.core.device.programming.write_noise.type = "gaussian"
+cs_params.core.device.programming.write_noise.sigma = WRITE_NOISE * (G_MAX - G_MIN)
+cs_params.core.device.programming.write_noise.type  = "gaussian"
+cs_params.core.device.programming.num_levels        = NUM_LEVELS
 
-# Quantization (number of conductance levels)
-params.core.device.programming.num_levels = NUM_LEVELS
+# Read noise (estimated as 10% of write noise)
+cs_params.core.device.read_noise.sigma = WRITE_NOISE * 0.1 * (G_MAX - G_MIN)
+cs_params.core.device.read_noise.type  = "gaussian"
 
-# Read noise (estimate from write noise)
-params.core.device.read_noise.sigma = WRITE_NOISE * 0.1 * (G_MAX - G_MIN)
-params.core.device.read_noise.type = "gaussian"
-
-print("CrossSim Parameters Configured:")
-print(f"  Conductance range: {{G_MIN*1e6:.2f}} - {{G_MAX*1e6:.2f}} µS")
-print(f"  Non-linearity: αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}")
-print(f"  Write noise: σ={{WRITE_NOISE:.4f}}")
-print(f"  Conductance levels: {{NUM_LEVELS}}")
+print("\nCrossSim configured:")
+print(f"  Architecture: 784 → {{HIDDEN_UNITS}} → 10, sigmoid, no bias")
+print(f"  Conductance: {{G_MIN*1e6:.3f}} – {{G_MAX*1e6:.3f}} µS")
+print(f"  αP={{ALPHA_P:.2f}}, αD={{ALPHA_D:.2f}}, σ_w={{WRITE_NOISE:.4f}}, N={{NUM_LEVELS}}")
 
 # ============================================================
-# DNN Setup and Training
+# DNN Training (adapt to your CrossSim API version)
 # ============================================================
-print("\nSetting up DNN with crossbar core...")
-print("Note: Modify the network architecture and training loop")
-print("according to CrossSim's latest API documentation.")
-print("See: https://cross-sim.sandia.gov/")
+# See: https://github.com/sandialabs/cross-sim for current API
+#
+# Example (CrossSim v3):
+#   network = [784, HIDDEN_UNITS, 10]
+#   dnn = DNN(cs_params, network, activations=['sigmoid','linear'])
+#   dnn.train_network(epochs=EPOCHS, learning_rate=LEARNING_RATE, dataset='mnist')
+#   acc = dnn.evaluate(dataset='mnist')
+#   print(f"Test accuracy: {{acc:.2f}}%")
 
-# Example architecture setup (adapt to your CrossSim version):
-# dnn = DNN(params)
-# dnn.set_network([784, 128, 10])
-# dnn.train_network(epochs=50, dataset='mnist')
-# dnn.evaluate()
-
-print("\nScript generated successfully.")
-print("Please adapt the training loop to your CrossSim version.")
+print("\nCrossSim script ready. Adapt the training loop to your CrossSim version.")
+print("For GPU acceleration, run on Google Colab: https://colab.research.google.com")
 "#,
         g_min = params.g_min,
         g_max = params.g_max,
@@ -601,12 +600,16 @@ pub fn generate_memtorch_script(params: ScriptParams, config: ScriptANNConfig) -
 Memristor Neural Analyzer — MemTorch Simulation Script
 Generated with device parameters from experimental data.
 
-MemTorch is a PyTorch-based framework for simulating memristive
-deep neural networks. It patches standard PyTorch models to use
-memristive device models for weight storage.
+IMPORTANT: MemTorch requires a legacy environment:
+  - Python 3.9 (NOT 3.10+)
+  - PyTorch 1.10.0 or 1.11.0 (NOT newer)
+  - CUDA 11.x (if using GPU)
 
-Requirements:
-  pip install memtorch torch torchvision matplotlib numpy
+Installation (in a dedicated conda environment):
+  conda create -n memtorch python=3.9
+  conda activate memtorch
+  pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 -f https://download.pytorch.org/whl/torch_stable.html
+  pip install memtorch
 
 Reference: https://github.com/coreylammie/MemTorch
 Paper: Lammie et al., "MemTorch: An Open-Source Simulation Framework

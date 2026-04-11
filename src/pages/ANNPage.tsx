@@ -7,7 +7,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { AppLineChart } from '../components/Chart';
 import { ChartControls } from '../components/ChartControls';
 import { StatCard } from '../components/StatCard';
-import { ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, ExternalLink, Zap } from 'lucide-react';
 import { exportChartData } from '../lib/chartExport';
 import type { ANNEpochResult, ANNModelType, ChartLocalSettings, FrameworkType } from '../types';
 
@@ -62,6 +62,8 @@ export function ANNPage() {
     xLabel: 'Epoch', yLabel: 'Accuracy (%)', plotType: 'line', caption: '',
   });
   const [expandedFramework, setExpandedFramework] = useState<string | null>(null);
+  const [showColabDialog, setShowColabDialog] = useState(false);
+  const [colabScriptSaved, setColabScriptSaved] = useState(false);
 
   useEffect(() => {
     const unlisten = listen<ANNEpochResult>('ann-progress', (event) => {
@@ -148,6 +150,33 @@ export function ANNPage() {
       if (String(e) !== 'null') {
         setError(String(e));
       }
+    }
+  };
+
+  const handleColabExport = async () => {
+    if (!extractedParams) return;
+    try {
+      const scriptParams = {
+        Gmin: extractedParams.Gmin,
+        Gmax: extractedParams.Gmax,
+        alphaP: extractedParams.alphaP,
+        alphaD: extractedParams.alphaD,
+        writeNoise: extractedParams.writeNoise,
+        numLevelsP: extractedParams.numLevelsP,
+        numLevelsD: extractedParams.numLevelsD,
+      };
+      const script = await invoke<string>('generate_python_script', { params: scriptParams, config: annConfig });
+      const path = await save({
+        filters: [{ name: 'Python', extensions: ['py'] }],
+        defaultPath: 'memristor_colab_training.py',
+      });
+      if (path) {
+        await writeTextFile(path, script);
+        setColabScriptSaved(true);
+      }
+      setShowColabDialog(true);
+    } catch (e) {
+      if (String(e) !== 'null') setError(String(e));
     }
   };
 
@@ -311,7 +340,7 @@ export function ANNPage() {
             </div>
             {isPythonOnly && (
               <p className="text-[11px] text-amber text-center mt-1">
-                CNN models run via Python script only. In-app training will use MLP (2 Hidden).
+                CNN/LeNet-5 requires GPU. Use the Colab button below.
               </p>
             )}
           </div>
@@ -333,6 +362,31 @@ export function ANNPage() {
               />
             </div>
           )}
+
+          {/* Google Colab — full GPU training */}
+          <div className="bg-surface rounded-xl border border-amber/30 p-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <Zap size={14} className="text-amber" />
+              <h3 className="text-sm font-medium text-text">Run Full Training on Google Colab</h3>
+            </div>
+            <p className="text-[11px] text-text-muted leading-relaxed">
+              Full MNIST (60,000 images) training benefits from GPU access. Export your script
+              and run it on Colab in one click.
+              {isPythonOnly && (
+                <span className="block mt-1 text-amber font-medium">
+                  Required for LeNet-5 / CNN — these cannot train in-app.
+                </span>
+              )}
+            </p>
+            <button
+              onClick={handleColabExport}
+              disabled={!extractedParams}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-amber/10 border border-amber/30 text-amber rounded-lg text-xs font-medium hover:bg-amber/20 disabled:opacity-50 transition-colors"
+            >
+              <ExternalLink size={12} />
+              Export Script &amp; Open Colab Instructions
+            </button>
+          </div>
 
           {/* Framework script generators */}
           <div className="bg-surface rounded-xl border border-border p-4 space-y-2">
@@ -464,6 +518,55 @@ export function ANNPage() {
       </div>
 
       {error && <p className="text-sm text-red">{error}</p>}
+
+      {/* Colab instructions dialog */}
+      {showColabDialog && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowColabDialog(false)}>
+          <div className="bg-surface border border-border rounded-2xl p-6 max-w-md w-full mx-4 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2">
+              <Zap size={18} className="text-amber" />
+              <h3 className="text-base font-semibold text-text">Run on Google Colab</h3>
+            </div>
+
+            {colabScriptSaved && (
+              <div className="text-xs bg-green/10 border border-green/20 rounded-lg px-3 py-2 text-green">
+                Script saved successfully.
+              </div>
+            )}
+
+            <div className="text-sm text-text-muted space-y-2">
+              <p className="font-medium text-text">Steps to run with GPU:</p>
+              <ol className="list-decimal list-inside space-y-1.5 text-xs leading-relaxed">
+                <li>Go to <strong>colab.research.google.com</strong></li>
+                <li>Click <strong>File → Upload notebook</strong> and upload the saved <code className="bg-surface-alt px-1 rounded">.py</code> file</li>
+                <li>Click <strong>Runtime → Change runtime type → GPU</strong></li>
+                <li>Click <strong>Run all</strong> (or press Ctrl+F9)</li>
+              </ol>
+              <p className="text-[11px] text-text-dim mt-1">
+                Training with real MNIST (60,000 images) typically takes 2–5 minutes on a T4 GPU.
+              </p>
+            </div>
+
+            <div className="flex gap-2">
+              <a
+                href="https://colab.research.google.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-amber/10 border border-amber/30 text-amber rounded-lg text-xs font-medium hover:bg-amber/20 transition-colors"
+              >
+                <ExternalLink size={12} />
+                Open Google Colab
+              </a>
+              <button
+                onClick={() => setShowColabDialog(false)}
+                className="px-4 py-2 bg-surface-alt border border-border rounded-lg text-xs text-text-muted hover:text-text transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

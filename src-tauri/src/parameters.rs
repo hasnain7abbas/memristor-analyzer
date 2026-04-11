@@ -197,8 +197,8 @@ pub fn extract_parameters(
     };
 
     // ─── Step 4: Alpha fitting (averaged curve) ────────────────────────
-    let (alpha_p, r_squared_p, p_fitted) = fit_alpha(&p_smoothed, g_min, g_max, true);
-    let (alpha_d, r_squared_d, d_fitted) = fit_alpha(&d_smoothed, g_min, g_max, false);
+    let (alpha_p, r_squared_p, _gs_p, _ge_p, p_fitted) = fit_alpha_power_law(&p_smoothed);
+    let (alpha_d, r_squared_d, _gs_d, _ge_d, d_fitted) = fit_alpha_power_law(&d_smoothed);
 
     // Per-cycle alpha fitting
     let (alpha_p_percycle, alpha_d_percycle, alpha_p_percycle_std, alpha_d_percycle_std) =
@@ -208,9 +208,7 @@ pub fn extract_parameters(
                 if cycle.len() < 2 {
                     continue;
                 }
-                let c_min = cycle.iter().cloned().fold(f64::INFINITY, f64::min);
-                let c_max = cycle.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let (a, _, _) = fit_alpha(cycle, c_min, c_max, true);
+                let (a, _, _, _, _) = fit_alpha_power_law(cycle);
                 ap_vals.push(a);
             }
             let mut ad_vals = Vec::new();
@@ -218,9 +216,7 @@ pub fn extract_parameters(
                 if cycle.len() < 2 {
                     continue;
                 }
-                let c_min = cycle.iter().cloned().fold(f64::INFINITY, f64::min);
-                let c_max = cycle.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let (a, _, _) = fit_alpha(cycle, c_min, c_max, false);
+                let (a, _, _, _, _) = fit_alpha_power_law(cycle);
                 ad_vals.push(a);
             }
 
@@ -346,101 +342,155 @@ fn apply_smoothing(data: &[f64], config: &SmoothingConfigParam) -> Result<Vec<f6
     )
 }
 
-// ─── Nonlinear model ─────────────────────────────────────────────────
+// ─── Power-law model ─────────────────────────────────────────────────
+//
+// G(n) = G_start · h(n/N) + G_end · (1 − h(n/N))
+// where h(t) = (1 − t)^α,  t = n/N ∈ [0, 1]
+//
+// At t=0 (start): G = G_start
+// At t=1 (end):   G = G_end
+// α > 1 → levels cluster near G_end (abrupt saturation)
+// α < 1 → levels cluster near G_start
+// α = 1 → linear
 
-fn nonlinear_model(n: f64, n_total: f64, g_start: f64, g_end: f64, alpha: f64) -> f64 {
-    if alpha.abs() < 1e-10 {
-        // Linear case
-        g_start + (g_end - g_start) * n / n_total
-    } else {
-        let exp_term = (-alpha * n / n_total).exp();
-        let norm = 1.0 - (-alpha).exp();
-        if norm.abs() < 1e-15 {
-            g_start + (g_end - g_start) * n / n_total
-        } else {
-            g_start + (g_end - g_start) * (1.0 - exp_term) / norm
-        }
-    }
+fn power_law_basis(t: f64, alpha: f64) -> f64 {
+    (1.0_f64 - t).max(0.0).powf(alpha)
 }
 
 // ─── Alpha fitting ───────────────────────────────────────────────────
+//
+// Fits the power-law alpha model with FREE G_start and G_end endpoints.
+// For each candidate alpha, the optimal G_start/G_end are solved analytically
+// via 2×2 OLS (no grid-resolution dependency on endpoint estimates).
+// Alpha is searched with an 80-point log-spaced coarse scan followed by
+// golden-section refinement to 1e-4 precision on [0.01, 200].
+//
+// Returns (alpha, r_squared, g_start, g_end, fitted_curve).
 
-fn fit_alpha(
-    data: &[f64],
-    g_min: f64,
-    g_max: f64,
-    is_potentiation: bool,
-) -> (f64, f64, Vec<f64>) {
+fn fit_alpha_power_law(data: &[f64]) -> (f64, f64, f64, f64, Vec<f64>) {
     let n = data.len();
     if n < 2 {
-        return (0.0, 0.0, data.to_vec());
+        let g_start = data.first().copied().unwrap_or(0.0);
+        let g_end = data.last().copied().unwrap_or(0.0);
+        return (1.0, 0.0, g_start, g_end, data.to_vec());
     }
 
     let n_total = (n - 1) as f64;
-    let (g_start, g_end) = if is_potentiation {
-        (g_min, g_max)
-    } else {
-        (g_max, g_min)
+
+    // For fixed alpha, solve for optimal G_start and G_end via OLS.
+    // Model: G[i] = G_start * h[i] + G_end * (1 - h[i])  where h[i] = (1-i/N)^alpha
+    let ols_fit = |alpha: f64| -> (f64, f64, f64) {
+        let mut s_hh = 0.0_f64;
+        let mut s_h1h = 0.0_f64;
+        let mut s_1h1h = 0.0_f64;
+        let mut s_gh = 0.0_f64;
+        let mut s_g1h = 0.0_f64;
+
+        for i in 0..n {
+            let t = i as f64 / n_total;
+            let h = power_law_basis(t, alpha);
+            let one_minus_h = 1.0 - h;
+            let g = data[i];
+            s_hh += h * h;
+            s_h1h += h * one_minus_h;
+            s_1h1h += one_minus_h * one_minus_h;
+            s_gh += g * h;
+            s_g1h += g * one_minus_h;
+        }
+
+        let det = s_hh * s_1h1h - s_h1h * s_h1h;
+        let (g_start, g_end) = if det.abs() < 1e-20 {
+            let g_mean = data.iter().sum::<f64>() / n as f64;
+            (g_mean, g_mean)
+        } else {
+            (
+                (s_gh * s_1h1h - s_g1h * s_h1h) / det,
+                (s_hh * s_g1h - s_h1h * s_gh) / det,
+            )
+        };
+
+        // SSE with optimal G_start/G_end
+        let sse: f64 = (0..n)
+            .map(|i| {
+                let t = i as f64 / n_total;
+                let h = power_law_basis(t, alpha);
+                let pred = g_start * h + g_end * (1.0 - h);
+                (data[i] - pred).powi(2)
+            })
+            .sum();
+
+        (g_start, g_end, sse)
     };
 
-    // Coarse grid search: α from 0.01 to 15.0, step 0.05
-    let mut best_alpha = 0.01f64;
+    // Coarse scan: 80 log-spaced points over [0.01, 200]
+    let log_lo = (0.01_f64).log10();
+    let log_hi = (200.0_f64).log10();
+    let coarse_n = 80_usize;
+    let mut best_alpha = 0.01_f64;
     let mut best_sse = f64::INFINITY;
-
-    let mut alpha = 0.01;
-    while alpha <= 15.0 {
-        let sse: f64 = (0..n)
-            .map(|i| {
-                let pred = nonlinear_model(i as f64, n_total, g_start, g_end, alpha);
-                (data[i] - pred).powi(2)
-            })
-            .sum();
+    for k in 0..=coarse_n {
+        let alpha = 10.0_f64.powf(log_lo + k as f64 * (log_hi - log_lo) / coarse_n as f64);
+        let (_, _, sse) = ols_fit(alpha);
         if sse < best_sse {
             best_sse = sse;
             best_alpha = alpha;
         }
-        alpha += 0.05;
     }
 
-    // Fine grid search: best_alpha ± 0.3, step 0.001
-    let fine_start = (best_alpha - 0.3).max(0.001);
-    let fine_end = best_alpha + 0.3;
-    alpha = fine_start;
-    while alpha <= fine_end {
-        let sse: f64 = (0..n)
-            .map(|i| {
-                let pred = nonlinear_model(i as f64, n_total, g_start, g_end, alpha);
-                (data[i] - pred).powi(2)
-            })
-            .sum();
-        if sse < best_sse {
-            best_sse = sse;
-            best_alpha = alpha;
+    // Golden-section refinement around the coarse minimum
+    let mut a = (best_alpha * 0.5).max(0.01);
+    let mut b = (best_alpha * 2.0).min(200.0);
+    let phi = (5.0_f64.sqrt() - 1.0) / 2.0; // ≈ 0.618
+    let tol = 1e-4_f64;
+    let mut c = b - phi * (b - a);
+    let mut d = a + phi * (b - a);
+    let mut fc = ols_fit(c).2;
+    let mut fd = ols_fit(d).2;
+    for _ in 0..120 {
+        if (b - a).abs() <= tol {
+            break;
         }
-        alpha += 0.001;
+        if fc < fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - phi * (b - a);
+            fc = ols_fit(c).2;
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + phi * (b - a);
+            fd = ols_fit(d).2;
+        }
     }
+    let best_alpha = (a + b) / 2.0;
+    let (best_g_start, best_g_end, _) = ols_fit(best_alpha);
 
-    // Generate fitted curve
+    // Fitted curve
     let fitted: Vec<f64> = (0..n)
-        .map(|i| nonlinear_model(i as f64, n_total, g_start, g_end, best_alpha))
+        .map(|i| {
+            let t = i as f64 / n_total;
+            let h = power_law_basis(t, best_alpha);
+            best_g_start * h + best_g_end * (1.0 - h)
+        })
         .collect();
 
-    // Compute R²
+    // R²
     let mean: f64 = data.iter().sum::<f64>() / n as f64;
     let ss_tot: f64 = data.iter().map(|x| (x - mean).powi(2)).sum();
     let ss_res: f64 = data
         .iter()
         .zip(fitted.iter())
-        .map(|(actual, pred)| (actual - pred).powi(2))
+        .map(|(a, p)| (a - p).powi(2))
         .sum();
-
     let r_squared = if ss_tot > 1e-15 {
         1.0 - ss_res / ss_tot
     } else {
         0.0
     };
 
-    (best_alpha, r_squared, fitted)
+    (best_alpha, r_squared, best_g_start, best_g_end, fitted)
 }
 
 // ─── CCV and write noise ─────────────────────────────────────────────
